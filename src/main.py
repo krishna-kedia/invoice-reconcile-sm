@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config.loader import Config
 from database.client import DatabaseClient
 from database.models import FileStatus, OperationType, LogStatus
+from database.table_manager import ensure_all_tables_exist
 from drive.client import DriveClient
 from drive.discovery import FileDiscovery
 from processors.factory import ProcessorFactory
@@ -63,6 +64,11 @@ class InvoiceReconcileSystem:
         
         # Initialize discovery
         self.discovery = FileDiscovery(self.drive_client, self.db_client)
+        
+        # Ensure all document type tables exist
+        logger.info("Checking document type tables...")
+        ensure_all_tables_exist(self.config, self.db_client)
+        logger.info("Document type tables verified")
     
     def run_discovery(self) -> None:
         """Run file discovery for all configured document types."""

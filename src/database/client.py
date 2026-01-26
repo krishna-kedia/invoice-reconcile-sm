@@ -8,6 +8,7 @@ from .models import (
     FileRecord, FileStatus, OCROutput, Extraction, 
     ProcessingLog, OperationType, LogStatus
 )
+from .table_manager import sanitize_table_name, get_column_name
 
 
 class DatabaseClient:
@@ -144,6 +145,10 @@ class DatabaseClient:
                          extraction_metadata: Optional[Dict[str, Any]] = None) -> Extraction:
         """Insert structured extraction record.
         
+        Inserts into both:
+        1. extractions table (JSONB - for audit/history)
+        2. document-specific table (normalized columns)
+        
         Args:
             file_id: File UUID
             document_type: Document type name
@@ -153,6 +158,7 @@ class DatabaseClient:
         Returns:
             Extraction instance
         """
+        # Insert into extractions table (JSONB - for audit)
         data = {
             'file_id': file_id,
             'document_type': document_type,
@@ -162,7 +168,23 @@ class DatabaseClient:
         result = self.client.table('extractions').insert(data).execute()
         if not result.data:
             raise ValueError("Failed to insert extraction")
-        return Extraction.from_dict(result.data[0])
+        extraction = Extraction.from_dict(result.data[0])
+        
+        # Also insert into document-specific normalized table
+        # If this fails, log error but don't fail the entire operation
+        # (extractions table is already updated for audit)
+        try:
+            self.insert_document_extraction(file_id, document_type, extracted_fields)
+        except Exception as e:
+            # Log error but don't raise - extractions table is already updated
+            import logging
+            logger = logging.getLogger('invoice_reconcile')
+            logger.warning(
+                f"Failed to insert into document-specific table for {document_type}: {str(e)}. "
+                f"Data still saved in extractions table."
+            )
+        
+        return extraction
     
     def get_extraction(self, file_id: str) -> Optional[Extraction]:
         """Get extraction for a file.
@@ -177,6 +199,37 @@ class DatabaseClient:
         if result.data:
             return Extraction.from_dict(result.data[0])
         return None
+    
+    def insert_document_extraction(self, file_id: str, document_type: str,
+                                  extracted_fields: Dict[str, Any]) -> None:
+        """Insert into document-specific normalized table.
+        
+        Args:
+            file_id: File UUID
+            document_type: Document type name
+            extracted_fields: Extracted field values (dict with field names as keys)
+        
+        Raises:
+            ValueError: If insertion fails
+        """
+        table_name = sanitize_table_name(document_type)
+        
+        # Prepare data for insertion
+        # Map field names to column names and extract values
+        data = {'file_id': file_id}
+        
+        for field_name, value in extracted_fields.items():
+            column_name = get_column_name(field_name)
+            data[column_name] = value
+        
+        # Insert into document-specific table
+        try:
+            result = self.client.table(table_name).insert(data).execute()
+            if not result.data:
+                raise ValueError(f"Failed to insert into {table_name} table")
+        except Exception as e:
+            # Re-raise with more context
+            raise ValueError(f"Failed to insert into {table_name} table: {str(e)}")
     
     # Processing log operations
     def insert_log(self, operation: OperationType, status: LogStatus,
