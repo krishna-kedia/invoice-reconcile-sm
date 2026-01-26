@@ -195,3 +195,118 @@ def ensure_all_tables_exist(config, db_client) -> None:
             import logging
             logger = logging.getLogger('invoice_reconcile')
             logger.warning(f"Could not auto-create table for {document_type}: {e}")
+
+
+def generate_child_table_sql(document_type: str, array_field: Dict[str, Any]) -> str:
+    """Generate CREATE TABLE SQL for a child table (for array fields).
+    
+    Args:
+        document_type: Parent document type name
+        array_field: Array field definition with child_table and child_fields
+    
+    Returns:
+        CREATE TABLE SQL statement
+    """
+    parent_table = sanitize_table_name(document_type)
+    child_table_name = sanitize_table_name(array_field['child_table'])
+    
+    columns = [
+        "id UUID PRIMARY KEY DEFAULT gen_random_uuid()",
+        f"{parent_table}_id UUID NOT NULL REFERENCES {parent_table}(id) ON DELETE CASCADE",
+    ]
+    
+    # Add columns for each child field
+    for field in array_field['child_fields']:
+        field_name = field['name']
+        field_type = field['type']
+        is_required = field.get('required', False)
+        
+        column_name = get_column_name(field_name)
+        sql_type = FIELD_TYPE_TO_SQL.get(field_type, 'TEXT')
+        
+        nullable = "NOT NULL" if is_required else "NULL"
+        columns.append(f"{column_name} {sql_type} {nullable}")
+    
+    columns.append("created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()")
+    
+    sql = f"CREATE TABLE IF NOT EXISTS {child_table_name} (\n"
+    sql += ",\n".join(f"    {col}" for col in columns)
+    sql += "\n);"
+    
+    return sql
+
+
+def generate_child_table_indexes_sql(document_type: str, array_field: Dict[str, Any]) -> List[str]:
+    """Generate CREATE INDEX SQL statements for a child table.
+    
+    Args:
+        document_type: Parent document type name
+        array_field: Array field definition
+    
+    Returns:
+        List of CREATE INDEX SQL statements
+    """
+    parent_table = sanitize_table_name(document_type)
+    child_table_name = sanitize_table_name(array_field['child_table'])
+    indexes = []
+    
+    # Always index parent table foreign key
+    indexes.append(
+        f"CREATE INDEX IF NOT EXISTS idx_{child_table_name}_{parent_table}_id "
+        f"ON {child_table_name}({parent_table}_id);"
+    )
+    
+    # Index commonly queried fields
+    common_index_fields = ['transaction_date', 'settlement_date', 'date', 'id']
+    
+    for field in array_field['child_fields']:
+        field_name = field['name']
+        column_name = get_column_name(field_name)
+        
+        if any(common in field_name.lower() for common in common_index_fields):
+            index_name = f"idx_{child_table_name}_{column_name}"
+            indexes.append(
+                f"CREATE INDEX IF NOT EXISTS {index_name} "
+                f"ON {child_table_name}({column_name});"
+            )
+    
+    return indexes
+
+
+def generate_all_tables_sql(document_type: str, fields: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Generate SQL for main table and all child tables.
+    
+    Args:
+        document_type: Document type name
+        fields: List of field definitions
+    
+    Returns:
+        Dictionary with table_name -> SQL mappings
+    """
+    tables = {}
+    
+    # Generate main table SQL (excluding array fields)
+    main_fields = [f for f in fields if f.get('type') != 'array']
+    if main_fields:
+        main_table_name = sanitize_table_name(document_type)
+        tables[main_table_name] = generate_table_sql(document_type, main_fields)
+    
+    # Generate child tables for array fields
+    for field in fields:
+        if field.get('type') == 'array' and 'child_table' in field:
+            child_table_name = sanitize_table_name(field['child_table'])
+            tables[child_table_name] = generate_child_table_sql(document_type, field)
+    
+    return tables
+
+
+def get_array_fields(fields: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Get list of array fields from field definitions.
+    
+    Args:
+        fields: List of field definitions
+    
+    Returns:
+        List of array field definitions
+    """
+    return [f for f in fields if f.get('type') == 'array' and 'child_table' in f]

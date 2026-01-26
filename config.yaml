@@ -16,44 +16,10 @@ connections:
     max_tokens: 4096
 
 document_types:
-  # - document_type: booking_com_invoice
-  #   drive_folder_id: "${DRIVE_FOLDER_ID_BOOKING}"
-  #   file_types: [pdf, jpg, jpeg, png, heic]
-
-  #   extraction_prompt: |
-  #     Extract Booking.com commission invoice details.
-  #     Return invoice number, invoice date, stay period,
-  #     gross revenue, commission amount, tax if present,
-  #     and net payable.
-
-  #   fields:
-  #     - name: invoice_number
-  #       type: string
-  #       required: true
-  #     - name: invoice_date
-  #       type: date
-  #       required: true
-  #     - name: period_start
-  #       type: date
-  #       required: true
-  #     - name: period_end
-  #       type: date
-  #       required: true
-  #     - name: gross_revenue
-  #       type: number
-  #       required: true
-  #     - name: commission_amount
-  #       type: number
-  #       required: true
-  #     - name: tax_amount
-  #       type: number
-  #       required: false
-  #     - name: net_payable
-  #       type: number
-  #       required: true
   - document_type: hotel_invoice
     drive_folder_id: "${HOTEL_INVOICES}"
     file_types: [pdf, jpg, jpeg, png, heic]
+    # pdf_password: "your_password_here"  # Optional - only needed for password-protected PDFs
 
     extraction_prompt: |
       Extract hotel invoice details from GST Tax Invoice.
@@ -95,3 +61,173 @@ document_types:
       - name: invoice_number
         type: string
         required: true
+  - document_type: mmt_invoice
+    drive_folder_id: "${MMT_INVOICES}"
+    file_types: [pdf, jpg, jpeg, png, heic]
+
+    extraction_prompt: |
+      Extract MakeMyTrip (MMT) invoice details from the document.
+      Extract primary guest details (name), booking ID, booked on date,
+      check-in date, check-out date, room charges, extra adult/child charges,
+      property taxes, service charge, property gross charges, Go-MMT commission,
+      GST on commission, TCD (Tax Collected at Source), and TDS (Tax Deducted at Source).
+
+    fields:
+      - name: primary_guest_details
+        type: string
+        required: true
+      - name: booking_id
+        type: string
+        required: true
+      - name: booked_on
+        type: date
+        required: true
+      - name: check_in
+        type: date
+        required: true
+      - name: check_out
+        type: date
+        required: true
+      - name: room_charges
+        type: number
+        required: true
+      - name: extra_adult_child_charges
+        type: number
+        required: true
+      - name: property_taxes
+        type: number
+        required: true
+      - name: service_charge
+        type: number
+        required: true
+      - name: property_gross_charges
+        type: number
+        required: true
+      - name: go_mmt_commission
+        type: number
+        required: true
+      - name: gst_on_commission
+        type: number
+        required: true
+      - name: tcs
+        type: number
+        required: false
+      - name: tds
+        type: number
+        required: false
+  - document_type: card_settlement
+    drive_folder_id: "${HDFC_MPR_HOTEL_ACCOUNT}"
+    file_types: [pdf, jpg, jpeg, png, heic]
+    main_table: card_settlement  # Custom main table name (defaults to document_type if not specified)
+    pdf_password: "AYH059"
+    extraction_prompt: |
+      You are reading an HDFC Bank Merchant Payment Report (MPR) PDF. Your job is to extract structured financial and transaction data. This document follows a consistent layout. Use the instructions below to identify where each required field appears.
+
+      MPR DATE
+      The report date appears near the top of the document in the line:
+      "MERCHANT PAYMENT REPORT FOR DD-MMM-YYYY"
+      Extract the date written after the word "FOR". Convert it into numeric format (DD-MM-YYYY).
+
+      CARD SUMMARY FINANCIALS (OVERALL TOTALS)
+      Scroll to the section containing a table with headers similar to:
+      DESCRIPTION | GROSS | DISCOUNT | GST AMT | NET
+      In this table, locate the row beginning with either:
+      "SALE :" or "MERCHANT :"
+      These rows contain the same totals. From that row extract:
+      - Gross Amount → value under GROSS
+      - Discount → value under DISCOUNT (this represents total MDR charged by the bank)
+      - GST Amount → value under GST AMT
+      - Net Amount → value under NET
+      Ignore rows labeled CASH AMOUNT and REFUND.
+
+      CARD TRANSACTIONS (POS / TERMINAL PAYMENTS)
+      Find the section that starts with a line like:
+      "TERMINAL - XXXXXXXX"
+      Below it appears a transaction table with headers similar to:
+      REC | BAT | CARD | *CAT | CARD NUMBER | TRANS DATE | SETTLE DATE | APPROV CODE | GROSS AMOUNT | MDR RATE | ...
+      Each row in this table represents one card transaction.
+      For each row:
+      - Transaction Date → column labeled TRANS DATE
+      - Settlement Date → column labeled SETTLE DATE
+      - Gross Amount → value under GROSS AMOUNT (some rows may have separate Domestic and International columns; use whichever has a non-zero value)
+      - MDR Percent → value under MDR RATE
+      Ignore masked card numbers and approval codes unless specifically required.
+
+      UPI TRANSACTIONS
+      Locate the section titled:
+      "UPI Transaction detail"
+      Under this heading there is a table with headers like:
+      REC | PAY TYPE | Payer VPA | TRANS DATE | SETTLE DATE | AMOUNT | RRN No. | UPI txn id
+      Each row is one UPI payment.
+      For each row:
+      - Transaction Date → column labeled TRANS DATE
+      - Settlement Date → column labeled SETTLE DATE
+      - Amount → value under AMOUNT
+      - VPA → value under Payer VPA
+      - UPI Transaction ID → value under the last column labeled UPI txn id
+      Ignore the "UPI Transaction Summary" section; only use rows under "UPI Transaction detail".
+
+      GENERAL RULES
+      - Use only values from transaction and summary tables, not policy notes or fee schedules.
+      - Treat all monetary values as they appear in the report.
+      - Do not use explanatory paragraphs in the document.
+      - If a section is not present, treat it as empty rather than guessing.
+      - Return JSON with gross_amount, discount, gst_amount, net_amount, MPR_date, and arrays: card[] and upi[].
+      - Arrays can be empty if no transactions are present.
+
+    fields:
+      # Main table fields
+      - name: gross_amount
+        type: number
+        required: true
+      - name: discount
+        type: number
+        required: true
+      - name: gst_amount
+        type: number
+        required: true
+      - name: net_amount
+        type: number
+        required: true
+      - name: mpr_date
+        type: date
+        required: true
+      # Array field for card transactions
+      - name: card
+        type: array
+        required: false
+        child_table: card_transactions
+        child_fields:
+          - name: transaction_date
+            type: date
+            required: true
+          - name: settlement_date
+            type: date
+            required: true
+          - name: gross_amount
+            type: number
+            required: true
+          - name: mdr_percent
+            type: number
+            required: true
+      # Array field for UPI transactions
+      - name: upi
+        type: array
+        required: false
+        child_table: upi_transactions
+        child_fields:
+          - name: transaction_date
+            type: date
+            required: true
+          - name: settlement_date
+            type: date
+            required: true
+          - name: amount
+            type: number
+            required: true
+          - name: vpa
+            type: string
+            required: true
+          - name: upi_transaction_id
+            type: string
+            required: true

@@ -5,6 +5,18 @@ Final
 Authoritative source of truth  
 Backend-only
 
+## Enhancements (Post-Implementation)
+
+The following features were added after initial implementation:
+
+1. **Document-Specific Normalized Tables**: Each document type now has its own database table with columns matching extracted fields (e.g., `hotel_invoice` table). Data is stored in both the `extractions` table (JSONB for audit) and document-specific tables (normalized columns for queries).
+
+2. **PDF Password Support**: System supports password-protected PDFs. Passwords can be configured per document type in `config.yaml` using the optional `pdf_password` field. PDFs are automatically decrypted before processing.
+
+3. **Nested Arrays and Multiple Tables**: System supports extracting nested array fields that map to multiple database tables. Array fields can be defined in config with `type: array`, `child_table`, and `child_fields`. The system automatically creates a main table for top-level fields and child tables for array items, with proper foreign key relationships.
+
+4. **Custom Main Table Names**: For document types with nested arrays, you can specify a custom main table name using the `main_table` field in config. This allows multiple document types to share the same child tables (e.g., `card_transactions`, `upi_transactions`) while having different main tables.
+
 ---
 
 ## 1. Objective
@@ -68,7 +80,8 @@ v
 Supabase (Postgres)
 ├── File state & retries
 ├── Raw OCR output
-└── Structured extraction tables
+├── Structured extraction table (JSONB - audit)
+└── Document-specific tables (normalized columns per document type)
 
 
 ---
@@ -136,6 +149,8 @@ document_types:
       gross revenue, commission amount, tax if present,
       and net payable.
 
+    pdf_password: "your_password_here"  # Optional - only for password-protected PDFs
+
     fields:
       - name: invoice_number
         type: string
@@ -161,3 +176,124 @@ document_types:
       - name: net_payable
         type: number
         required: true
+```
+
+### 7.3 Nested Arrays and Multiple Tables
+
+For documents with nested array structures (e.g., payment settlements with card and UPI transaction arrays), the system supports creating multiple related tables. This is useful for documents like bank payment reports that contain summary totals plus detailed transaction lists.
+
+#### Configuration Structure
+
+```yaml
+document_types:
+  - document_type: hdfc_mpr
+    drive_folder_id: "${HDFC_MPR_FOLDER}"
+    file_types: [pdf, jpg, jpeg, png, heic]
+    main_table: card_settlement  # Optional: custom main table name
+    pdf_password: "password"     # Optional: for password-protected PDFs
+
+    extraction_prompt: |
+      Extract HDFC Bank Merchant Payment Report details.
+      Return gross_amount, discount, gst_amount, net_amount, mpr_date,
+      and arrays: card[] and upi[].
+
+    fields:
+      # Main table fields (stored in card_settlement table)
+      - name: gross_amount
+        type: number
+        required: true
+      - name: discount
+        type: number
+        required: true
+      - name: gst_amount
+        type: number
+        required: true
+      - name: net_amount
+        type: number
+        required: true
+      - name: mpr_date
+        type: date
+        required: true
+      
+      # Array field - creates child table: card_transactions
+      - name: card
+        type: array
+        required: false
+        child_table: card_transactions
+        child_fields:
+          - name: transaction_date
+            type: date
+            required: true
+          - name: settlement_date
+            type: date
+            required: true
+          - name: gross_amount
+            type: number
+            required: true
+          - name: mdr_percent
+            type: number
+            required: true
+      
+      # Array field - creates child table: upi_transactions
+      - name: upi
+        type: array
+        required: false
+        child_table: upi_transactions
+        child_fields:
+          - name: transaction_date
+            type: date
+            required: true
+          - name: settlement_date
+            type: date
+            required: true
+          - name: amount
+            type: number
+            required: true
+          - name: vpa
+            type: string
+            required: true
+          - name: upi_transaction_id
+            type: string
+            required: true
+```
+
+#### How It Works
+
+1. **Main Table**: Stores top-level summary fields (e.g., `card_settlement` with `gross_amount`, `discount`, `gst_amount`, `net_amount`, `mpr_date`)
+
+2. **Child Tables**: Store array items with foreign key relationships:
+   - `card_transactions` → stores individual card payment transactions
+   - `upi_transactions` → stores individual UPI payment transactions
+   - Both reference main table via `{main_table}_id` (e.g., `card_settlement_id`)
+
+3. **Extraction Flow**:
+   - LLM extracts data and returns JSON with nested arrays
+   - System automatically splits data:
+     - Main fields → inserted into main table
+     - Array items → bulk inserted into child tables
+   - Empty arrays are handled gracefully (no child records created)
+
+4. **Custom Main Table Names**: 
+   - Use `main_table` field to specify a custom table name
+   - Defaults to `document_type` if not specified
+   - Useful when multiple document types share the same child table structure
+
+#### Database Structure Example
+
+For the HDFC MPR example above, the system creates:
+
+- **`card_settlement`** (main table):
+  - `id`, `file_id`, `gross_amount`, `discount`, `gst_amount`, `net_amount`, `mpr_date`
+
+- **`card_transactions`** (child table):
+  - `id`, `card_settlement_id` (FK), `transaction_date`, `settlement_date`, `gross_amount`, `mdr_percent`
+
+- **`upi_transactions`** (child table):
+  - `id`, `card_settlement_id` (FK), `transaction_date`, `settlement_date`, `amount`, `vpa`, `upi_transaction_id`
+
+#### Benefits
+
+- **Normalized Data**: Transaction details stored separately from summary totals
+- **Efficient Queries**: Query transactions by date, amount, etc. without scanning JSON
+- **Scalability**: Handles documents with hundreds of transactions
+- **Flexibility**: Arrays can be empty (no transactions) or contain many items

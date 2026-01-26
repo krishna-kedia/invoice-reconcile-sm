@@ -84,6 +84,14 @@ Return a JSON object with the extracted fields."""
             # Parse JSON response
             response_text = response.choices[0].message.content or "{}"
             extracted_fields = json.loads(response_text)
+            # #region agent log
+            with open('/Users/krishnagopalkedia/Documents/GitHub/invoice-reconcile-sm/.cursor/debug.log', 'a') as f:
+                import json as json_module
+                field_keys = list(extracted_fields.keys())
+                tcs_present = 'TCS' in extracted_fields or 'tcs' in extracted_fields
+                tds_present = 'TDS' in extracted_fields or 'tds' in extracted_fields
+                f.write(json_module.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H7","location":"structured_extractor.py:86","message":"Extracted fields keys","data":{"field_keys":field_keys,"tcs_present":tcs_present,"tds_present":tds_present,"tcs_value":extracted_fields.get('TCS') or extracted_fields.get('tcs'),"tds_value":extracted_fields.get('TDS') or extracted_fields.get('tds')},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+            # #endregion
             
             # Validate required fields
             missing_fields = []
@@ -98,6 +106,14 @@ Return a JSON object with the extracted fields."""
             
             # Validate and convert field types
             validated_fields = self._validate_and_convert_types(extracted_fields, fields)
+            # #region agent log
+            with open('/Users/krishnagopalkedia/Documents/GitHub/invoice-reconcile-sm/.cursor/debug.log', 'a') as f:
+                import json as json_module
+                validated_keys = list(validated_fields.keys())
+                tcs_final = validated_fields.get('TCS') or validated_fields.get('tcs')
+                tds_final = validated_fields.get('TDS') or validated_fields.get('tds')
+                f.write(json_module.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H9","location":"structured_extractor.py:100","message":"After validation","data":{"validated_keys":validated_keys,"tcs_final":tcs_final,"tds_final":tds_final},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+            # #endregion
             
             # Build metadata
             extraction_metadata = {
@@ -134,10 +150,24 @@ Return a JSON object with the extracted fields."""
         """
         validated = {}
         field_map = {field['name']: field for field in field_definitions}
+        # #region agent log
+        with open('/Users/krishnagopalkedia/Documents/GitHub/invoice-reconcile-sm/.cursor/debug.log', 'a') as f:
+            import json as json_module
+            config_field_names = list(field_map.keys())
+            extracted_field_names = list(extracted_fields.keys())
+            tcs_in_config = 'TCS' in config_field_names
+            tds_in_config = 'TDS' in config_field_names
+            f.write(json_module.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H7","location":"structured_extractor.py:136","message":"Field name matching","data":{"config_field_names":config_field_names,"extracted_field_names":extracted_field_names,"tcs_in_config":tcs_in_config,"tds_in_config":tds_in_config},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+        # #endregion
         
         for field_name, field_value in extracted_fields.items():
             if field_name not in field_map:
                 # Unknown field, keep as-is
+                # #region agent log
+                with open('/Users/krishnagopalkedia/Documents/GitHub/invoice-reconcile-sm/.cursor/debug.log', 'a') as f:
+                    import json as json_module
+                    f.write(json_module.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H7","location":"structured_extractor.py:140","message":"Unknown field (not in config)","data":{"field_name":field_name,"field_value":field_value},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+                # #endregion
                 validated[field_name] = field_value
                 continue
             

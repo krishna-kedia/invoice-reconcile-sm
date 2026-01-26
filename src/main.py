@@ -127,6 +127,18 @@ class InvoiceReconcileSystem:
             if not processor:
                 raise ValueError(f"No processor available for file type: {file_type}")
             
+            # Get document type config for password (if PDF)
+            pdf_password = None
+            if file_type.lower() == 'pdf':
+                doc_type_config = self.config.get_document_type(document_type)
+                if doc_type_config:
+                    pdf_password = doc_type_config.get('pdf_password')
+                    # #region agent log
+                    with open('/Users/krishnagopalkedia/Documents/GitHub/invoice-reconcile-sm/.cursor/debug.log', 'a') as f:
+                        import json
+                        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H3","location":"main.py:135","message":"Password from config","data":{"document_type":document_type,"has_password":pdf_password is not None,"password_length":len(pdf_password) if pdf_password else 0},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+                    # #endregion
+            
             # Process file (OCR or direct parse)
             logger.info(f"Processing file with {processor.__class__.__name__}")
             self.db_client.insert_log(
@@ -136,7 +148,12 @@ class InvoiceReconcileSystem:
                 details={'processor': processor.__class__.__name__}
             )
             
-            process_result = processor.process(file_content, file_type)
+            # Process with password if provided (for PDFs)
+            # Only OCRProcessor supports password parameter
+            if file_type.lower() == 'pdf' and pdf_password:
+                process_result = processor.process(file_content, file_type, password=pdf_password)
+            else:
+                process_result = processor.process(file_content, file_type)
             raw_text = process_result['raw_text']
             ocr_metadata = process_result.get('metadata', {})
             
@@ -174,12 +191,15 @@ class InvoiceReconcileSystem:
             
             logger.info(f"Extracted {len(extracted_fields)} fields from {file_name}")
             
-            # Store extraction
+            # Store extraction (pass fields_config for array handling and main_table if specified)
+            main_table = doc_type_config.get('main_table')  # Optional custom main table name
             self.db_client.insert_extraction(
                 file_id=file_id,
                 document_type=document_type,
                 extracted_fields=extracted_fields,
-                extraction_metadata=extraction_metadata
+                extraction_metadata=extraction_metadata,
+                fields_config=doc_type_config['fields'],  # Pass fields config for nested arrays
+                main_table=main_table  # Pass custom main table name if specified
             )
             
             # Update status to completed

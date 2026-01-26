@@ -49,6 +49,9 @@ This document provides a comprehensive overview of the Phase 1 implementation of
 12. ✅ Error handling and retry logic
 13. ✅ Logging system
 14. ✅ Documentation and setup scripts
+15. ✅ Document-specific normalized tables (per document type)
+16. ✅ PDF password removal service
+17. ✅ Nested arrays and multiple tables support
 
 ### Technology Stack
 
@@ -87,8 +90,10 @@ invoice-reconcile-sm/
 │   │   ├── __init__.py
 │   │   ├── models.py             # Data models and enums
 │   │   ├── client.py             # Supabase client wrapper
+│   │   ├── table_manager.py      # Document-specific table management
 │   │   └── migrations/
-│   │       └── 001_initial_schema.sql  # Database schema
+│   │       ├── 001_initial_schema.sql  # Database schema
+│   │       └── 002_document_type_tables.sql  # Document-specific tables
 │   │
 │   ├── drive/                    # Google Drive integration
 │   │   ├── __init__.py
@@ -109,7 +114,8 @@ invoice-reconcile-sm/
 │   └── utils/                    # Utilities
 │       ├── __init__.py
 │       ├── logging.py           # Logging setup
-│       └── retry.py              # Retry decorators
+│       ├── retry.py              # Retry decorators
+│       └── pdf_decryptor.py      # PDF password removal service
 │
 └── scripts/                      # Setup and deployment scripts
     ├── setup_db.sql              # Database setup script
@@ -135,6 +141,7 @@ invoice-reconcile-sm/
 - Supports multiple document types
 - Field validation schema (type, required flags)
 - Custom extraction prompts per document type
+- Optional PDF password per document type (for password-protected PDFs)
 
 **Example Configuration**:
 ```yaml
@@ -312,6 +319,29 @@ status = FileStatus.PENDING
 
 ---
 
+#### `src/database/table_manager.py`
+**Purpose**: Document-specific table management
+
+**Key Functions**:
+- `generate_table_sql(document_type, fields) -> str`: Generate CREATE TABLE SQL for main table
+- `generate_indexes_sql(document_type, fields) -> List[str]`: Generate index SQL
+- `generate_child_table_sql(document_type, array_field) -> str`: Generate CREATE TABLE SQL for child tables (nested arrays)
+- `generate_child_table_indexes_sql(document_type, array_field) -> List[str]`: Generate indexes for child tables
+- `generate_all_tables_sql(document_type, fields) -> Dict[str, str]`: Generate SQL for main + all child tables
+- `get_array_fields(fields) -> List[Dict]`: Extract array field definitions from config
+- `check_table_exists(db_client, document_type) -> bool`: Check if table exists
+- `ensure_table_exists(db_client, document_type, fields) -> None`: Create table if missing
+- `ensure_all_tables_exist(config, db_client) -> None`: Ensure all document type tables exist
+
+**Features**:
+- Maps field types to SQL types (string→TEXT, number→NUMERIC, date→DATE)
+- Generates normalized tables from config.yaml definitions
+- Supports nested arrays: creates main table + child tables with foreign keys
+- Creates indexes on file_id, parent table foreign keys, and commonly queried fields
+- Sanitizes table and column names for SQL safety
+
+---
+
 #### `src/database/client.py`
 **Purpose**: Supabase database client wrapper
 
@@ -334,6 +364,15 @@ status = FileStatus.PENDING
 4. **Logging Operations**:
    - `insert_log()`: Create audit trail entry
    - `get_file_logs()`: Get all logs for a file
+
+5. **Document-Specific Table Operations**:
+   - `insert_document_extraction()`: Insert into document-specific normalized table(s) - supports main table + child tables for arrays
+   - `insert_extraction()`: Updated to insert into both extractions table (JSONB) and document-specific table(s)
+   - Both methods accept:
+     - `fields_config`: Field definitions from config (needed for array handling)
+     - `main_table`: Optional custom main table name (defaults to document_type)
+   - Automatically handles splitting main fields from array fields
+   - Bulk inserts child table records for efficiency
 
 **Design Decisions**:
 - Uses Supabase Python client (not raw SQL)
@@ -528,6 +567,11 @@ content = drive_client.download_file(file_id)
 - Validates image conversion
 - Provides descriptive error messages
 
+**PDF Password Support**:
+- Supports password-protected PDFs via optional `password` parameter
+- Automatically decrypts PDFs before processing if password is provided
+- Handles decryption failures gracefully (logs warning, tries original PDF)
+
 **Usage**:
 ```python
 processor = OCRProcessor(api_key, model="gpt-4-vision-preview")
@@ -698,6 +742,30 @@ def api_call():
 
 ---
 
+#### `src/utils/pdf_decryptor.py`
+**Purpose**: PDF password decryption service
+
+**Key Methods**:
+- `is_password_protected(pdf_bytes) -> bool`: Check if PDF is password-protected
+- `decrypt_pdf(pdf_bytes, password) -> bytes`: Decrypt password-protected PDF
+
+**Features**:
+- Handles both encrypted and unencrypted PDFs
+- Returns decrypted PDF bytes for further processing
+- Raises ValueError if password is incorrect
+
+**Library**: Uses `pypdf` for PDF manipulation
+
+**Usage**:
+```python
+from utils.pdf_decryptor import decrypt_pdf, is_password_protected
+
+if is_password_protected(pdf_bytes):
+    decrypted = decrypt_pdf(pdf_bytes, "password")
+```
+
+---
+
 ### Scripts
 
 #### `scripts/setup_db.sql`
@@ -769,6 +837,7 @@ chmod +x scripts/run_cron.sh
 - `psycopg2-binary>=2.9.0`: PostgreSQL driver
 - `python-dateutil>=2.8.0`: Date parsing
 - `xlrd>=2.0.0`: XLS support
+- `pypdf>=3.0.0`: PDF password decryption
 
 ---
 
@@ -814,7 +883,9 @@ Supabase (ocr_outputs table)
     ↓ (extract)
 Structured Extractor
     ↓ (structured fields)
-Supabase (extractions table)
+Supabase (extractions table - JSONB for audit)
+    ↓ (also insert into)
+Supabase (document-specific table - normalized columns)
     ↓ (update status)
 Supabase (files table - status=completed)
 ```
@@ -903,11 +974,272 @@ document_types:
    ```
 5. No code changes needed!
 
+### Adding Nested Arrays (Multiple Tables)
+
+For documents with nested arrays (e.g., bank payment reports with transaction lists), define array fields with `type: array`. This creates a main table for summary data and child tables for array items.
+
+#### Example: HDFC Bank Merchant Payment Report
+
+```yaml
+document_types:
+  - document_type: hdfc_mpr
+    drive_folder_id: "${HDFC_MPR_FOLDER}"
+    file_types: [pdf]
+    main_table: card_settlement  # Custom main table name
+    pdf_password: "AYH059"       # Optional: for password-protected PDFs
+
+    extraction_prompt: |
+      Extract HDFC Bank Merchant Payment Report details.
+      Return gross_amount, discount, gst_amount, net_amount, mpr_date,
+      and arrays: card[] (with transaction_date, settlement_date, gross_amount, mdr_percent)
+      and upi[] (with transaction_date, settlement_date, amount, vpa, upi_transaction_id).
+
+    fields:
+      # Main table fields → stored in card_settlement
+      - name: gross_amount
+        type: number
+        required: true
+      - name: discount
+        type: number
+        required: true
+      - name: gst_amount
+        type: number
+        required: true
+      - name: net_amount
+        type: number
+        required: true
+      - name: mpr_date
+        type: date
+        required: true
+      
+      # Array field → creates card_transactions child table
+      - name: card
+        type: array
+        required: false
+        child_table: card_transactions
+        child_fields:
+          - name: transaction_date
+            type: date
+            required: true
+          - name: settlement_date
+            type: date
+            required: true
+          - name: gross_amount
+            type: number
+            required: true
+          - name: mdr_percent
+            type: number
+            required: true
+      
+      # Array field → creates upi_transactions child table
+      - name: upi
+        type: array
+        required: false
+        child_table: upi_transactions
+        child_fields:
+          - name: transaction_date
+            type: date
+            required: true
+          - name: settlement_date
+            type: date
+            required: true
+          - name: amount
+            type: number
+            required: true
+          - name: vpa
+            type: string
+            required: true
+          - name: upi_transaction_id
+            type: string
+            required: true
+```
+
+#### How It Works
+
+1. **Main Table**: Created from non-array fields (e.g., `card_settlement` with summary totals)
+2. **Child Tables**: Created for each array field (e.g., `card_transactions`, `upi_transactions`)
+3. **Foreign Keys**: Child tables reference main table via `{main_table}_id`
+4. **Data Flow**:
+   - LLM extracts and returns JSON with nested arrays
+   - System splits data automatically:
+     - Main fields → `card_settlement` table
+     - Card array items → `card_transactions` table (bulk insert)
+     - UPI array items → `upi_transactions` table (bulk insert)
+5. **Empty Arrays**: Handled gracefully (no child records created if array is empty)
+
+#### Migration SQL
+
+Create migration script (e.g., `005_hdfc_mpr_tables.sql`):
+
+```sql
+-- Main table
+CREATE TABLE IF NOT EXISTS card_settlement (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    file_id UUID NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    gross_amount NUMERIC(15, 2) NOT NULL,
+    discount NUMERIC(15, 2) NOT NULL,
+    gst_amount NUMERIC(15, 2) NOT NULL,
+    net_amount NUMERIC(15, 2) NOT NULL,
+    mpr_date DATE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
+-- Child table for card transactions
+CREATE TABLE IF NOT EXISTS card_transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    card_settlement_id UUID NOT NULL REFERENCES card_settlement(id) ON DELETE CASCADE,
+    transaction_date DATE NOT NULL,
+    settlement_date DATE NOT NULL,
+    gross_amount NUMERIC(15, 2) NOT NULL,
+    mdr_percent NUMERIC(15, 2) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
+-- Child table for UPI transactions
+CREATE TABLE IF NOT EXISTS upi_transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    card_settlement_id UUID NOT NULL REFERENCES card_settlement(id) ON DELETE CASCADE,
+    transaction_date DATE NOT NULL,
+    settlement_date DATE NOT NULL,
+    amount NUMERIC(15, 2) NOT NULL,
+    vpa TEXT NOT NULL,
+    upi_transaction_id TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
+-- Add indexes for performance
+CREATE INDEX IF NOT EXISTS idx_card_settlement_file_id ON card_settlement(file_id);
+CREATE INDEX IF NOT EXISTS idx_card_transactions_card_settlement_id ON card_transactions(card_settlement_id);
+CREATE INDEX IF NOT EXISTS idx_upi_transactions_card_settlement_id ON upi_transactions(card_settlement_id);
+```
+
+#### Key Points
+
+- **`main_table`**: Optional field to specify custom main table name (defaults to `document_type`)
+- **`type: array`**: Marks field as array that creates child table
+- **`child_table`**: Name of child table to create
+- **`child_fields`**: Field definitions for child table columns
+- **Arrays can be empty**: System handles missing or empty arrays gracefully
+- **Bulk inserts**: All child records inserted in single operation for efficiency
+
 ---
 
 ## Database Schema
 
 ### Tables
+
+#### Document-Specific Tables
+
+Each document type has its own normalized table (e.g., `hotel_invoice`, `booking_com_invoice`) with columns matching the extracted fields defined in `config.yaml`. These tables are created automatically based on the document type configuration.
+
+**Features**:
+- Table name matches `document_type` from config
+- Columns match field names from config
+- Field types mapped: string→TEXT, number→NUMERIC(15,2), date→DATE
+- Includes `file_id` foreign key to `files` table
+- Indexes on `file_id` and commonly queried fields
+- Created via migration scripts or auto-generated from config
+
+**Example**: `hotel_invoice` table includes columns: `guest_name`, `source`, `arrival_time`, `departure_time`, `booking_id`, `booking_date`, `taxable_amount`, `cgst`, `sgst`, `grand_total`, `invoice_number`.
+
+**Data Flow**: Extractions are stored in both:
+1. `extractions` table (JSONB - for audit/history)
+2. Document-specific table (normalized columns - for queries)
+
+#### Nested Arrays and Multiple Tables
+
+For documents with nested array structures (e.g., bank payment reports with transaction lists), the system supports creating multiple related tables. This enables normalized storage of summary data and detailed transaction records.
+
+**Real-World Example: HDFC Bank Merchant Payment Report**
+
+The HDFC MPR document type demonstrates nested arrays in practice:
+
+**Configuration**:
+```yaml
+document_type: hdfc_mpr
+main_table: card_settlement  # Custom main table name
+fields:
+  # Main table: card_settlement
+  - name: gross_amount
+  - name: discount
+  - name: gst_amount
+  - name: net_amount
+  - name: mpr_date
+  
+  # Array → child table: card_transactions
+  - name: card
+    type: array
+    child_table: card_transactions
+    child_fields:
+      - name: transaction_date
+      - name: settlement_date
+      - name: gross_amount
+      - name: mdr_percent
+  
+  # Array → child table: upi_transactions
+  - name: upi
+    type: array
+    child_table: upi_transactions
+    child_fields:
+      - name: transaction_date
+      - name: settlement_date
+      - name: amount
+      - name: vpa
+      - name: upi_transaction_id
+```
+
+**Database Structure**:
+
+1. **`card_settlement`** (main table):
+   - Stores summary totals: `gross_amount`, `discount`, `gst_amount`, `net_amount`, `mpr_date`
+   - One record per document
+
+2. **`card_transactions`** (child table):
+   - Stores individual card payment transactions
+   - Foreign key: `card_settlement_id` → references `card_settlement.id`
+   - Multiple records per document (one per transaction)
+
+3. **`upi_transactions`** (child table):
+   - Stores individual UPI payment transactions
+   - Foreign key: `card_settlement_id` → references `card_settlement.id`
+   - Multiple records per document (one per transaction)
+
+**How It Works**:
+
+1. **Extraction**: LLM extracts data and returns JSON:
+   ```json
+   {
+     "gross_amount": 100000,
+     "discount": 2000,
+     "gst_amount": 360,
+     "net_amount": 98360,
+     "mpr_date": "2025-04-20",
+     "card": [
+       {"transaction_date": "2025-04-19", "settlement_date": "2025-04-20", ...},
+       {"transaction_date": "2025-04-19", "settlement_date": "2025-04-20", ...}
+     ],
+     "upi": [
+       {"transaction_date": "2025-04-19", "settlement_date": "2025-04-20", ...}
+     ]
+   }
+   ```
+
+2. **Storage**:
+   - Main fields → inserted into `card_settlement` table
+   - Card array items → bulk inserted into `card_transactions` table
+   - UPI array items → bulk inserted into `upi_transactions` table
+
+3. **Empty Arrays**: If no transactions exist, arrays are empty `[]` and no child records are created
+
+**Key Features**:
+
+- **Custom Main Table Names**: Use `main_table` field to specify table name (defaults to `document_type`)
+- **Automatic Splitting**: System automatically separates main fields from array items
+- **Bulk Inserts**: All child records inserted in single operation for efficiency
+- **Foreign Key Relationships**: Child tables properly reference main table
+- **Graceful Handling**: Empty arrays don't cause errors
+
+**Migration**: See `src/database/migrations/005_hdfc_mpr_tables.sql` for complete SQL example.
 
 #### `files`
 Tracks all discovered files and processing status.
@@ -983,7 +1315,13 @@ Complete audit trail.
 files (1) ──→ (many) ocr_outputs
 files (1) ──→ (many) extractions
 files (1) ──→ (many) processing_logs
+files (1) ──→ (many) hotel_invoice (and other document-specific main tables)
+files (1) ──→ (many) card_settlement (HDFC MPR main table)
+card_settlement (1) ──→ (many) card_transactions (child table)
+card_settlement (1) ──→ (many) upi_transactions (child table)
 ```
+
+**Note**: For nested array document types, the main table (e.g., `card_settlement`) references `files`, and child tables (e.g., `card_transactions`, `upi_transactions`) reference the main table via `{main_table}_id`.
 
 ### Constraints
 
@@ -1617,8 +1955,10 @@ Phase 1 implementation is **complete** and ready for testing. The system provide
 | `src/extractors/structured_extractor.py` | ~200 | Field extraction | ✅ Complete |
 | `src/utils/logging.py` | ~40 | Logging setup | ✅ Complete |
 | `src/utils/retry.py` | ~40 | Retry utilities | ✅ Complete |
+| `src/utils/pdf_decryptor.py` | ~70 | PDF password decryption | ✅ Complete |
+| `src/database/table_manager.py` | ~200 | Document table management | ✅ Complete |
 | `config.yaml` | ~40 | Configuration | ✅ Complete |
-| `requirements.txt` | 13 | Dependencies | ✅ Complete |
+| `requirements.txt` | 16 | Dependencies | ✅ Complete |
 | `README.md` | ~300 | Documentation | ✅ Complete |
 | `scripts/setup_db.sql` | 90 | Database schema | ✅ Complete |
 | `scripts/run_cron.sh` | ~20 | Cron wrapper | ✅ Complete |

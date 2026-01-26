@@ -15,8 +15,10 @@ except ImportError:
     pass  # pillow-heif not available, HEIC files will fail
 
 from openai import OpenAI
+import logging
 
 from .base import BaseProcessor
+from utils.pdf_decryptor import decrypt_pdf, is_password_protected
 
 
 class OCRProcessor(BaseProcessor):
@@ -42,22 +44,90 @@ class OCRProcessor(BaseProcessor):
         return file_type.lower() in self.SUPPORTED_TYPES
     
     def process(self, file_content: bytes, file_type: str,
-               metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+               metadata: Optional[Dict[str, Any]] = None,
+               password: Optional[str] = None) -> Dict[str, Any]:
         """Process file using OpenAI Vision API.
         
         Args:
             file_content: File content as bytes
             file_type: File extension
             metadata: Optional file metadata
+            password: Optional password for password-protected PDFs
         
         Returns:
             Dictionary with 'raw_text' and 'metadata' keys
         """
         file_type_lower = file_type.lower()
+        logger = logging.getLogger('invoice_reconcile')
+        
+        # Handle PDF decryption if password is provided
+        if file_type_lower == 'pdf' and password:
+            # #region agent log
+            with open('/Users/krishnagopalkedia/Documents/GitHub/invoice-reconcile-sm/.cursor/debug.log', 'a') as f:
+                import json
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H3","location":"ocr_processor.py:64","message":"Password received in process","data":{"has_password":password is not None,"password_length":len(password) if password else 0},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+            # #endregion
+            try:
+                # Check if PDF is password-protected
+                is_protected = is_password_protected(file_content)
+                # #region agent log
+                with open('/Users/krishnagopalkedia/Documents/GitHub/invoice-reconcile-sm/.cursor/debug.log', 'a') as f:
+                    import json
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H1","location":"ocr_processor.py:67","message":"PDF password protection check","data":{"is_protected":is_protected},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+                # #endregion
+                if is_protected:
+                    logger.info("PDF is password-protected, attempting decryption...")
+                    original_size = len(file_content)
+                    file_content = decrypt_pdf(file_content, password)
+                    decrypted_size = len(file_content)
+                    # #region agent log
+                    with open('/Users/krishnagopalkedia/Documents/GitHub/invoice-reconcile-sm/.cursor/debug.log', 'a') as f:
+                        import json
+                        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H2","location":"ocr_processor.py:69","message":"PDF decryption result","data":{"original_size":original_size,"decrypted_size":decrypted_size,"sizes_match":original_size==decrypted_size},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+                    # #endregion
+                    logger.info("PDF decryption succeeded")
+                else:
+                    logger.info("PDF is not password-protected, proceeding without decryption")
+            except ValueError as e:
+                # Decryption failed (wrong password)
+                # #region agent log
+                with open('/Users/krishnagopalkedia/Documents/GitHub/invoice-reconcile-sm/.cursor/debug.log', 'a') as f:
+                    import json
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H2","location":"ocr_processor.py:74","message":"PDF decryption ValueError","data":{"error":str(e)},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+                # #endregion
+                logger.warning(f"PDF decryption failed: {str(e)}. Attempting to process original PDF...")
+                # Continue with original bytes - may fail at pdf2image stage
+            except Exception as e:
+                # Other decryption errors
+                # #region agent log
+                with open('/Users/krishnagopalkedia/Documents/GitHub/invoice-reconcile-sm/.cursor/debug.log', 'a') as f:
+                    import json
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H2","location":"ocr_processor.py:78","message":"PDF decryption Exception","data":{"error":str(e)},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+                # #endregion
+                logger.warning(f"PDF decryption error: {str(e)}. Attempting to process original PDF...")
+                # Continue with original bytes
         
         # Convert PDF to images
         if file_type_lower == 'pdf':
-            images = convert_from_bytes(file_content)
+            # #region agent log
+            with open('/Users/krishnagopalkedia/Documents/GitHub/invoice-reconcile-sm/.cursor/debug.log', 'a') as f:
+                import json
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H4","location":"ocr_processor.py:84","message":"Before convert_from_bytes","data":{"file_content_size":len(file_content)},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+            # #endregion
+            try:
+                images = convert_from_bytes(file_content)
+                # #region agent log
+                with open('/Users/krishnagopalkedia/Documents/GitHub/invoice-reconcile-sm/.cursor/debug.log', 'a') as f:
+                    import json
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H4","location":"ocr_processor.py:84","message":"After convert_from_bytes","data":{"num_images":len(images) if images else 0},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+                # #endregion
+            except Exception as e:
+                # #region agent log
+                with open('/Users/krishnagopalkedia/Documents/GitHub/invoice-reconcile-sm/.cursor/debug.log', 'a') as f:
+                    import json
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H4","location":"ocr_processor.py:84","message":"convert_from_bytes failed","data":{"error":str(e)},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+                # #endregion
+                raise
             if not images:
                 raise ValueError("Failed to convert PDF to images")
             

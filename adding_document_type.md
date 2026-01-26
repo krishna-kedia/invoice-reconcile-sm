@@ -60,6 +60,7 @@ document_types:
   - document_type: expedia_invoice          # Unique identifier (used as table name)
     drive_folder_id: "${DRIVE_FOLDER_ID_EXPEDIA}"  # Must match .env variable name
     file_types: [pdf, jpg, jpeg, png, heic]        # Supported file extensions
+    pdf_password: "your_password_here"     # Optional - only for password-protected PDFs
     
     extraction_prompt: |
       Extract Expedia commission invoice details.
@@ -117,6 +118,13 @@ document_types:
 - List of file extensions this document type supports
 - Options: `pdf`, `jpg`, `jpeg`, `png`, `heic`, `xlsx`, `xls`, `csv`
 - Use lowercase
+
+**pdf_password** (optional):
+- Password for password-protected PDFs
+- Only needed if your PDFs are password-protected
+- If provided, the system will automatically decrypt PDFs before processing
+- If PDF is not password-protected, this field is ignored
+- Example: `pdf_password: "MySecurePassword123"`
 
 **extraction_prompt** (required):
 - Instructions for the LLM on what to extract
@@ -285,6 +293,7 @@ document_types:
   - document_type: booking_com_invoice
     drive_folder_id: "${DRIVE_FOLDER_ID_BOOKING}"
     file_types: [pdf, jpg, jpeg, png]
+    pdf_password: "MyPassword123"  # Optional - only if PDFs are password-protected
     
     extraction_prompt: |
       Extract Booking.com commission invoice details.
@@ -398,12 +407,34 @@ CREATE INDEX IF NOT EXISTS idx_booking_com_invoice_invoice_date ON booking_com_i
 
 ---
 
+## PDF Password Protection
+
+If your PDFs are password-protected, you can configure the password in `config.yaml`:
+
+```yaml
+- document_type: hotel_invoice
+  drive_folder_id: "${HOTEL_INVOICES}"
+  file_types: [pdf, jpg, jpeg, png, heic]
+  pdf_password: "your_password_here"  # Add this line for password-protected PDFs
+  extraction_prompt: |
+    ...
+```
+
+**How it works**:
+- System automatically detects if PDF is password-protected
+- If password is provided in config, PDF is decrypted before processing
+- If password is wrong or PDF isn't encrypted, system logs warning and continues
+- Works seamlessly with existing processing pipeline
+
+**Note**: Only add `pdf_password` if your PDFs are actually password-protected. The system will ignore this field for unencrypted PDFs.
+
 ## Quick Checklist
 
 - [ ] Google Drive folder created and shared with service account
 - [ ] Folder ID copied
 - [ ] Folder ID added to `.env`
 - [ ] Document type added to `config.yaml`
+- [ ] PDF password added (if PDFs are password-protected)
 - [ ] Extraction prompt written
 - [ ] Fields defined with correct types
 - [ ] Database table created (SQL run in Supabase)

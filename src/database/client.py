@@ -142,18 +142,22 @@ class DatabaseClient:
     # Extraction operations
     def insert_extraction(self, file_id: str, document_type: str,
                          extracted_fields: Dict[str, Any],
-                         extraction_metadata: Optional[Dict[str, Any]] = None) -> Extraction:
+                         extraction_metadata: Optional[Dict[str, Any]] = None,
+                         fields_config: Optional[List[Dict[str, Any]]] = None,
+                         main_table: Optional[str] = None) -> Extraction:
         """Insert structured extraction record.
         
         Inserts into both:
         1. extractions table (JSONB - for audit/history)
-        2. document-specific table (normalized columns)
+        2. document-specific table(s) (normalized columns, including child tables for arrays)
         
         Args:
             file_id: File UUID
             document_type: Document type name
             extracted_fields: Extracted field values
             extraction_metadata: Optional metadata (prompt, model, etc.)
+            fields_config: Optional field definitions from config (needed for array fields)
+            main_table: Optional custom main table name (defaults to document_type)
             
         Returns:
             Extraction instance
@@ -170,11 +174,11 @@ class DatabaseClient:
             raise ValueError("Failed to insert extraction")
         extraction = Extraction.from_dict(result.data[0])
         
-        # Also insert into document-specific normalized table
+        # Also insert into document-specific normalized table(s)
         # If this fails, log error but don't fail the entire operation
         # (extractions table is already updated for audit)
         try:
-            self.insert_document_extraction(file_id, document_type, extracted_fields)
+            self.insert_document_extraction(file_id, document_type, extracted_fields, fields_config, main_table)
         except Exception as e:
             # Log error but don't raise - extractions table is already updated
             import logging
@@ -201,35 +205,81 @@ class DatabaseClient:
         return None
     
     def insert_document_extraction(self, file_id: str, document_type: str,
-                                  extracted_fields: Dict[str, Any]) -> None:
-        """Insert into document-specific normalized table.
+                                  extracted_fields: Dict[str, Any],
+                                  fields_config: Optional[List[Dict[str, Any]]] = None,
+                                  main_table: Optional[str] = None) -> None:
+        """Insert into document-specific normalized tables (main + child tables).
         
         Args:
             file_id: File UUID
             document_type: Document type name
             extracted_fields: Extracted field values (dict with field names as keys)
+            fields_config: Optional field definitions from config (needed for array fields)
+            main_table: Optional custom main table name (defaults to document_type)
         
         Raises:
             ValueError: If insertion fails
         """
-        table_name = sanitize_table_name(document_type)
+        from .table_manager import get_array_fields
         
-        # Prepare data for insertion
-        # Map field names to column names and extract values
-        data = {'file_id': file_id}
+        # Use custom main_table if provided, otherwise use document_type
+        main_table_name = sanitize_table_name(main_table) if main_table else sanitize_table_name(document_type)
+        
+        # Separate main fields from array fields
+        main_data = {'file_id': file_id}
+        array_data = {}
+        
+        # Get array field definitions if provided
+        array_fields_config = get_array_fields(fields_config) if fields_config else []
+        array_field_names = {af['name']: af for af in array_fields_config}
         
         for field_name, value in extracted_fields.items():
-            column_name = get_column_name(field_name)
-            data[column_name] = value
+            if field_name in array_field_names:
+                # This is an array field - store for child table insertion
+                array_data[field_name] = value
+            else:
+                # Regular field - add to main table
+                column_name = get_column_name(field_name)
+                main_data[column_name] = value
         
-        # Insert into document-specific table
+        # Insert into main table first
         try:
-            result = self.client.table(table_name).insert(data).execute()
+            result = self.client.table(main_table_name).insert(main_data).execute()
             if not result.data:
-                raise ValueError(f"Failed to insert into {table_name} table")
+                raise ValueError(f"Failed to insert into {main_table_name} table")
+            
+            main_record_id = result.data[0]['id']
+            
+            # Insert into child tables
+            for array_field_name, array_value in array_data.items():
+                if not isinstance(array_value, list):
+                    continue  # Skip if not an array
+                
+                array_field_config = array_field_names[array_field_name]
+                child_table_name = sanitize_table_name(array_field_config['child_table'])
+                
+                # Prepare child table records
+                child_records = []
+                for item in array_value:
+                    if not isinstance(item, dict):
+                        continue
+                    
+                    child_record = {f"{main_table_name}_id": main_record_id}
+                    for child_field in array_field_config['child_fields']:
+                        child_field_name = child_field['name']
+                        child_column_name = get_column_name(child_field_name)
+                        if child_field_name in item:
+                            child_record[child_column_name] = item[child_field_name]
+                    
+                    child_records.append(child_record)
+                
+                # Bulk insert child records
+                if child_records:
+                    self.client.table(child_table_name).insert(child_records).execute()
+        
         except Exception as e:
             # Re-raise with more context
-            raise ValueError(f"Failed to insert into {table_name} table: {str(e)}")
+            raise ValueError(f"Failed to insert into {main_table_name} table: {str(e)}")
     
     # Processing log operations
     def insert_log(self, operation: OperationType, status: LogStatus,
