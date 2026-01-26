@@ -2,6 +2,7 @@
 
 from typing import List, Optional, Dict, Any
 from datetime import datetime
+import pandas as pd
 from supabase import create_client, Client
 
 from .models import (
@@ -9,6 +10,7 @@ from .models import (
     ProcessingLog, OperationType, LogStatus
 )
 from .table_manager import sanitize_table_name, get_column_name
+from .excel_inserter import ExcelDirectInserter
 
 
 class DatabaseClient:
@@ -324,3 +326,35 @@ class DatabaseClient:
         if result.data:
             return [ProcessingLog.from_dict(row) for row in result.data]
         return []
+    
+    def insert_excel_rows_direct(
+        self,
+        file_id: str,
+        document_type: str,
+        df: pd.DataFrame,
+        fields_config: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Insert Excel DataFrame rows directly into document-specific table.
+        
+        Args:
+            file_id: File UUID
+            document_type: Document type name
+            df: DataFrame with normalized column names
+            fields_config: Field definitions from config
+        
+        Returns:
+            Dict with insertion results:
+            {
+                'success': bool,
+                'rows_inserted': int,
+                'rows_failed': int,
+                'errors': List[Dict[str, Any]]
+            }
+        """
+        inserter = ExcelDirectInserter(self)
+        return inserter.insert_bank_statement_rows(
+            file_id=file_id,
+            df=df,
+            document_type=document_type,
+            fields_config=fields_config
+        )

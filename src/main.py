@@ -171,40 +171,100 @@ class InvoiceReconcileSystem:
             if not doc_type_config:
                 raise ValueError(f"Document type config not found: {document_type}")
             
-            # Extract structured fields
-            logger.info(f"Extracting structured fields for {file_name}")
-            self.db_client.insert_log(
-                operation=OperationType.EXTRACTION,
-                status=LogStatus.SUCCESS,
-                file_id=file_id,
-                details={'document_type': document_type}
-            )
+            # Check if Excel file with direct insertion enabled
+            excel_direct_insert = doc_type_config.get('excel_direct_insert', False)
             
-            extraction_result = self.extractor.extract(
-                raw_text=raw_text,
-                extraction_prompt=doc_type_config['extraction_prompt'],
-                fields=doc_type_config['fields']
-            )
-            
-            extracted_fields = extraction_result['extracted_fields']
-            extraction_metadata = extraction_result['metadata']
-            
-            logger.info(f"Extracted {len(extracted_fields)} fields from {file_name}")
-            
-            # Store extraction (pass fields_config for array handling and main_table if specified)
-            main_table = doc_type_config.get('main_table')  # Optional custom main table name
-            self.db_client.insert_extraction(
-                file_id=file_id,
-                document_type=document_type,
-                extracted_fields=extracted_fields,
-                extraction_metadata=extraction_metadata,
-                fields_config=doc_type_config['fields'],  # Pass fields config for nested arrays
-                main_table=main_table  # Pass custom main table name if specified
-            )
-            
-            # Update status to completed
-            self.db_client.update_file_status(file_id, FileStatus.COMPLETED)
-            logger.info(f"Successfully processed file: {file_name}")
+            if file_type.lower() in ['xlsx', 'xls', 'csv'] and excel_direct_insert:
+                # Direct Excel insertion path (skip LLM)
+                logger.info(f"Processing Excel file with direct insertion for {file_name}")
+                
+                # Extract data between delimiters and normalize columns
+                df = processor.extract_data_between_delimiters(file_content, file_type)
+                df = processor.normalize_column_names(df)
+                
+                logger.info(f"Extracted {len(df)} rows from Excel file")
+                
+                # Store Excel metadata in ocr_outputs
+                self.db_client.insert_ocr_output(
+                    file_id=file_id,
+                    raw_text=f"Excel file with {len(df)} rows",
+                    ocr_metadata={
+                        'num_rows': len(df),
+                        'num_columns': len(df.columns),
+                        'column_names': df.columns.tolist(),
+                        'processing_method': 'excel_direct_insert'
+                    }
+                )
+                
+                # Direct insertion
+                result = self.db_client.insert_excel_rows_direct(
+                    file_id=file_id,
+                    document_type=document_type,
+                    df=df,
+                    fields_config=doc_type_config['fields']
+                )
+                
+                # Log extraction operation
+                self.db_client.insert_log(
+                    operation=OperationType.EXTRACTION,
+                    status=LogStatus.SUCCESS if result['success'] else LogStatus.FAILURE,
+                    file_id=file_id,
+                    details={
+                        'document_type': document_type,
+                        'processing_method': 'excel_direct_insert',
+                        'rows_inserted': result.get('rows_inserted', 0),
+                        'rows_failed': result.get('rows_failed', 0)
+                    }
+                )
+                
+                # Update status
+                if result['success']:
+                    if result.get('rows_failed', 0) > 0:
+                        logger.warning(
+                            f"Inserted {result['rows_inserted']} rows, "
+                            f"{result['rows_failed']} rows failed: {result.get('errors', [])}"
+                        )
+                    self.db_client.update_file_status(file_id, FileStatus.COMPLETED)
+                    logger.info(f"Successfully processed file: {file_name} ({result['rows_inserted']} rows inserted)")
+                else:
+                    error_msg = result.get('errors', [{}])[0].get('error', 'Unknown error') if result.get('errors') else 'Insertion failed'
+                    raise ValueError(f"Failed to insert Excel rows: {error_msg}")
+            else:
+                # Existing LLM extraction path
+                # Extract structured fields
+                logger.info(f"Extracting structured fields for {file_name}")
+                self.db_client.insert_log(
+                    operation=OperationType.EXTRACTION,
+                    status=LogStatus.SUCCESS,
+                    file_id=file_id,
+                    details={'document_type': document_type}
+                )
+                
+                extraction_result = self.extractor.extract(
+                    raw_text=raw_text,
+                    extraction_prompt=doc_type_config['extraction_prompt'],
+                    fields=doc_type_config['fields']
+                )
+                
+                extracted_fields = extraction_result['extracted_fields']
+                extraction_metadata = extraction_result['metadata']
+                
+                logger.info(f"Extracted {len(extracted_fields)} fields from {file_name}")
+                
+                # Store extraction (pass fields_config for array handling and main_table if specified)
+                main_table = doc_type_config.get('main_table')  # Optional custom main table name
+                self.db_client.insert_extraction(
+                    file_id=file_id,
+                    document_type=document_type,
+                    extracted_fields=extracted_fields,
+                    extraction_metadata=extraction_metadata,
+                    fields_config=doc_type_config['fields'],  # Pass fields config for nested arrays
+                    main_table=main_table  # Pass custom main table name if specified
+                )
+                
+                # Update status to completed
+                self.db_client.update_file_status(file_id, FileStatus.COMPLETED)
+                logger.info(f"Successfully processed file: {file_name}")
         
         except Exception as e:
             error_message = str(e)

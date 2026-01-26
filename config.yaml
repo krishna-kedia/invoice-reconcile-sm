@@ -242,3 +242,32 @@ document_types:
           - name: upi_transaction_id
             type: string
             required: true
+  - document_type: bank_statement
+    drive_folder_id: "${BANK_STATEMENTS}"
+    file_types: [xlsx, xls]
+    
+    # Direct Excel insertion (no LLM)
+    excel_direct_insert: true
+    
+    fields:
+      - name: date
+        type: date
+        required: true
+      - name: narration
+        type: string
+        required: true
+      - name: chq_ref_no
+        type: string
+        required: false
+      - name: value_dt
+        type: date
+        required: true
+      - name: withdrawal_amt
+        type: number
+        required: false
+      - name: deposit_amt
+        type: number
+        required: false
+      - name: closing_balance
+        type: number
+        required: true

@@ -97,10 +97,23 @@ class Config:
         for doc_type in self._config['document_types']:
             required_fields = ['document_type', 'drive_folder_id', 'file_types', 
                              'extraction_prompt', 'fields']
+            
+            # If excel_direct_insert is True, extraction_prompt is optional
+            excel_direct_insert = doc_type.get('excel_direct_insert', False)
+            if excel_direct_insert:
+                # For direct Excel insertion, extraction_prompt is optional
+                required_fields = ['document_type', 'drive_folder_id', 'file_types', 'fields']
+            
             for field in required_fields:
                 if field not in doc_type:
                     raise ValueError(f"Document type '{doc_type.get('document_type', 'unknown')}' "
                                    f"missing required field: {field}")
+            
+            # Validate excel_direct_insert flag if present
+            if 'excel_direct_insert' in doc_type:
+                if not isinstance(doc_type['excel_direct_insert'], bool):
+                    raise ValueError(f"Document type '{doc_type.get('document_type', 'unknown')}' "
+                                   f"excel_direct_insert must be a boolean")
     
     @property
     def system(self) -> Dict[str, Any]:
