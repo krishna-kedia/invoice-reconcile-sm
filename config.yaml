@@ -1,0 +1,97 @@
+system:
+  max_ocr_retries: 3
+  cron_schedule: "0 2 * * *"  # Daily at 2 AM
+
+connections:
+  supabase:
+    url: "${SUPABASE_URL}"
+    key: "${SUPABASE_KEY}"
+  
+  google_drive:
+    service_account_path: "${GOOGLE_SERVICE_ACCOUNT_JSON}"
+  
+  openai:
+    api_key: "${OPENAI_API_KEY}"
+    model: "gpt-4o"  # Stable model with vision capabilities
+    max_tokens: 4096
+
+document_types:
+  # - document_type: booking_com_invoice
+  #   drive_folder_id: "${DRIVE_FOLDER_ID_BOOKING}"
+  #   file_types: [pdf, jpg, jpeg, png, heic]
+
+  #   extraction_prompt: |
+  #     Extract Booking.com commission invoice details.
+  #     Return invoice number, invoice date, stay period,
+  #     gross revenue, commission amount, tax if present,
+  #     and net payable.
+
+  #   fields:
+  #     - name: invoice_number
+  #       type: string
+  #       required: true
+  #     - name: invoice_date
+  #       type: date
+  #       required: true
+  #     - name: period_start
+  #       type: date
+  #       required: true
+  #     - name: period_end
+  #       type: date
+  #       required: true
+  #     - name: gross_revenue
+  #       type: number
+  #       required: true
+  #     - name: commission_amount
+  #       type: number
+  #       required: true
+  #     - name: tax_amount
+  #       type: number
+  #       required: false
+  #     - name: net_payable
+  #       type: number
+  #       required: true
+  - document_type: hotel_invoice
+    drive_folder_id: "${HOTEL_INVOICES}"
+    file_types: [pdf, jpg, jpeg, png, heic]
+
+    extraction_prompt: |
+      Extract hotel invoice details from GST Tax Invoice.
+      Extract guest name, source, arrival time (date only), departure time (date only),
+      booking ID, booking date, taxable amount, CGST, SGST, grand total,
+      and invoice number from the GST Tax Invoice section.
+
+    fields:
+      - name: guest_name
+        type: string
+        required: true
+      - name: source
+        type: string
+        required: true
+      - name: arrival_time
+        type: date
+        required: true
+      - name: departure_time
+        type: date
+        required: true
+      - name: booking_id
+        type: string
+        required: true
+      - name: booking_date
+        type: date
+        required: true
+      - name: taxable_amount
+        type: number
+        required: true
+      - name: cgst
+        type: number
+        required: true
+      - name: sgst
+        type: number
+        required: true
+      - name: grand_total
+        type: number
+        required: true
+      - name: invoice_number
+        type: string
+        required: true
