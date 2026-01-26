@@ -175,18 +175,20 @@ class DatabaseClient:
         extraction = Extraction.from_dict(result.data[0])
         
         # Also insert into document-specific normalized table(s)
-        # If this fails, log error but don't fail the entire operation
-        # (extractions table is already updated for audit)
+        # This MUST succeed for the file to be marked as completed
+        # If this fails, raise exception so file status is marked as failed
         try:
             self.insert_document_extraction(file_id, document_type, extracted_fields, fields_config, main_table)
         except Exception as e:
-            # Log error but don't raise - extractions table is already updated
+            # Log error and re-raise - file should be marked as failed
             import logging
             logger = logging.getLogger('invoice_reconcile')
-            logger.warning(
+            logger.error(
                 f"Failed to insert into document-specific table for {document_type}: {str(e)}. "
-                f"Data still saved in extractions table."
+                f"File will be marked as failed."
             )
+            # Re-raise so caller can handle and mark file as failed
+            raise ValueError(f"Failed to insert into document-specific table: {str(e)}") from e
         
         return extraction
     

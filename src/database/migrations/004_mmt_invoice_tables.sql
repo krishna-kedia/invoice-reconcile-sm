@@ -17,8 +17,8 @@ CREATE TABLE IF NOT EXISTS mmt_invoice (
     property_gross_charges NUMERIC(15, 2) NOT NULL,
     go_mmt_commission NUMERIC(15, 2) NOT NULL,
     gst_on_commission NUMERIC(15, 2) NOT NULL,
-    tcd NUMERIC(15, 2) NOT NULL,
-    tds NUMERIC(15, 2) NOT NULL,
+    tcs NUMERIC(15, 2) NULL,
+    tds NUMERIC(15, 2) NULL,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
 

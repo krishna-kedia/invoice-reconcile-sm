@@ -52,6 +52,9 @@ This document provides a comprehensive overview of the Phase 1 implementation of
 15. ✅ Document-specific normalized tables (per document type)
 16. ✅ PDF password removal service
 17. ✅ Nested arrays and multiple tables support
+18. ✅ Robust status management (completed only after successful table insert)
+19. ✅ Case-insensitive field name matching
+20. ✅ Calculated field extraction support
 
 ### Technology Stack
 
@@ -219,8 +222,9 @@ document_types:
    - Routes to appropriate processor
    - Stores OCR/parsed output
    - Extracts structured fields
-   - Updates file status
-   - Comprehensive error handling
+   - **Status Management**: Only marks file as "completed" after successful insertion into document-specific tables
+   - **Error Handling**: Comprehensive exception handling ensures files are always marked as "failed" (never left in "processing" state)
+   - Logs all errors with full context
 
 4. **run_processing() Method**:
    - Fetches pending/failed files
@@ -234,9 +238,11 @@ document_types:
 
 **Error Handling**:
 - All exceptions caught and logged
-- File status updated on errors
+- File status updated on errors (always marked as "failed", never left in "processing")
 - Retry count incremented automatically
 - Errors logged to `processing_logs` table
+- **Table Insert Failures**: If document-specific table insertion fails, file is marked as "failed" with error details
+- **Robust Status Updates**: Status update to "failed" is wrapped in try-except to ensure it always succeeds, even if logging fails
 
 **Logging**:
 - Structured logging to console
@@ -373,6 +379,7 @@ status = FileStatus.PENDING
      - `main_table`: Optional custom main table name (defaults to document_type)
    - Automatically handles splitting main fields from array fields
    - Bulk inserts child table records for efficiency
+   - **Critical**: Raises exception if table insertion fails, ensuring files are marked as "failed" rather than "completed"
 
 **Design Decisions**:
 - Uses Supabase Python client (not raw SQL)
@@ -381,9 +388,11 @@ status = FileStatus.PENDING
 - Append-only writes (no updates to historical data)
 
 **Error Handling**:
-- Raises `ValueError` on failed inserts
+- Raises `ValueError` on failed inserts (including table insertion failures)
 - Returns `None` for not-found queries
 - All operations logged to database
+- **Status Management**: Files are only marked as "completed" after successful table insertion. If table insertion fails, the exception is re-raised and the file is marked as "failed" with error details.
+- **Robust Failure Handling**: Exception handling ensures files are always marked as "failed" and never left in "processing" state, even if error logging fails.
 
 ---
 
@@ -395,6 +404,10 @@ status = FileStatus.PENDING
 1. **files**:
    - Tracks all discovered files
    - Status management (pending → processing → completed/failed)
+   - **Status Rules**: 
+     - Files marked as "completed" ONLY after successful insertion into document-specific tables
+     - Files marked as "failed" if any step fails (OCR, extraction, or table insertion)
+     - Files never left in "processing" state - always transition to completed or failed
    - Retry count tracking
    - Indexes on drive_file_id, status, document_type
 
@@ -667,8 +680,10 @@ Row 2: col1: value4 | col2: value5 | col3: value6
 3. **Type Validation**:
    - Validates required fields present
    - Converts types (string, number, date)
-   - Handles number formatting (removes $, commas)
+   - Handles number formatting (removes $, ₹, commas)
    - Validates date formats (ISO preferred)
+   - **Case-Insensitive Field Matching**: Automatically maps field names regardless of case (e.g., `TCS` → `tcs`, `TDS` → `tds`)
+   - **Complete Field Coverage**: Ensures all config fields are present in output (sets to `None` if missing)
 
 4. **OpenAI Integration**:
    - Uses GPT-4 for extraction
@@ -681,6 +696,8 @@ Row 2: col1: value4 | col2: value5 | col3: value6
 - User prompt with field schema
 - Raw text included in prompt
 - Clear instructions for JSON output
+- **Calculated Fields**: Prompts can instruct LLM to calculate values when not explicitly present (e.g., "If TCS not mentioned, calculate as Property Gross Charges × 0.5%")
+- **Field Name Instructions**: Prompts can specify exact field names to use (e.g., "use lowercase: tcs, tds")
 
 **Error Handling**:
 - JSON parsing errors
@@ -1122,6 +1139,42 @@ CREATE INDEX IF NOT EXISTS idx_upi_transactions_card_settlement_id ON upi_transa
 - **Arrays can be empty**: System handles missing or empty arrays gracefully
 - **Bulk inserts**: All child records inserted in single operation for efficiency
 
+### Field Extraction Improvements
+
+#### Case-Insensitive Field Matching
+
+The system automatically handles case-insensitive field names. If the LLM returns uppercase field names (e.g., `TCS`, `TDS`) but your config specifies lowercase (e.g., `tcs`, `tds`), the system automatically maps them correctly.
+
+**Example**:
+- Config defines: `tcs`, `tds` (lowercase)
+- LLM returns: `TCS`, `TDS` (uppercase)
+- System maps: `TCS` → `tcs`, `TDS` → `tds`
+- Database receives: `tcs`, `tds` (matching config)
+
+#### Calculated Fields
+
+Extraction prompts can instruct the LLM to calculate values when they're not explicitly present in documents. This is useful for fields like TCS/TDS that may need to be calculated from other values.
+
+**Example**:
+```yaml
+extraction_prompt: |
+  Extract invoice details.
+  For TCS: If explicitly mentioned, extract that value. 
+  If not mentioned, calculate TCS as Property Gross Charges × 0.005 (0.5%).
+  
+  For TDS: If explicitly mentioned, extract that value.
+  If not mentioned, calculate TDS as Property Gross Charges × 0.001 (0.1%).
+```
+
+**Benefits**:
+- Handles documents where calculated values aren't explicitly stated
+- Ensures consistent data extraction even when document formats vary
+- Allows prompts to specify calculation formulas
+
+#### Complete Field Coverage
+
+The system ensures all fields defined in config are present in the validated output. Missing optional fields are set to `None` instead of being omitted, ensuring consistent data structure.
+
 ---
 
 ## Database Schema
@@ -1441,8 +1494,19 @@ pip install -r requirements.txt
 
 2. **Example field types**:
    - `string`: Text values
-   - `number`: Numeric values (handles currency symbols)
+   - `number`: Numeric values (handles currency symbols: $, ₹, commas)
    - `date`: Date values (ISO format: YYYY-MM-DD)
+   - `array`: Nested arrays that create child tables (see nested arrays section)
+
+3. **Field Name Best Practices**:
+   - Use lowercase snake_case for field names (e.g., `tcs`, `tds`, `booking_id`)
+   - System handles case-insensitive matching automatically
+   - If LLM returns uppercase, it's automatically mapped to config field names
+
+4. **Calculated Fields**:
+   - Prompts can instruct LLM to calculate values when not explicitly present
+   - Example: "If TCS not mentioned, calculate as Property Gross Charges × 0.5%"
+   - Useful for fields that may or may not be explicitly stated in documents
 
 ### Step 7: Test Configuration
 
@@ -1737,12 +1801,59 @@ GROUP BY operation, status;
 - **Cause**: File type not supported
 - **Solution**: Add processor or update file_types in config
 
-**Error**: `Failed to convert PDF to images`
-- **Cause**: Missing poppler (for pdf2image)
-- **Solution**: Install poppler:
-  ```bash
-  # macOS
-  brew install poppler
+**Error**: `Failed to convert PDF to images` or `Command Line Error: Incorrect password`
+- **Cause**: Missing poppler (for pdf2image) or password-protected PDF with wrong password
+- **Solution**: 
+  - Install poppler:
+    ```bash
+    # macOS
+    brew install poppler
+  - For password-protected PDFs: Verify `pdf_password` in config.yaml matches the PDF password
+  - Check logs to see if decryption was attempted and failed
+
+**Error**: `Failed to insert into document-specific table` or `Could not find the 'xxx' column`
+- **Cause**: Table schema doesn't match config fields (column name mismatch or missing column)
+- **Solution**: 
+  - Run migration script to update table schema
+  - Verify field names in config match database column names (case-sensitive in database)
+  - Check if field names were changed in config but table wasn't updated
+
+**Error**: File marked as "completed" but data not in table
+- **Cause**: This should not happen with current implementation
+- **Solution**: 
+  - Check if table insertion actually failed (should mark file as "failed")
+  - Verify exception handling is working correctly
+  - Check processing logs for table insertion errors
+
+**Error**: File stuck in "processing" status
+- **Cause**: Exception occurred but status update failed (should be rare)
+- **Solution**: 
+  - Check error logs for details
+  - Manually update status if needed: `UPDATE files SET status = 'failed' WHERE status = 'processing' AND updated_at < NOW() - INTERVAL '1 hour'`
+  - System should automatically mark as failed, but this is a fallback
+
+#### 6. Field Extraction Issues
+
+**Issue**: Fields not being extracted (showing as null)
+- **Cause**: Field not present in document or LLM not finding it
+- **Solution**: 
+  - Review extraction prompt - be more specific about field location
+  - For calculated fields: Ensure prompt includes calculation formula
+  - Check if field name matches between prompt and config (case-insensitive matching helps)
+
+**Issue**: Field name mismatch (e.g., LLM returns `TCS` but config has `tcs`)
+- **Cause**: Case sensitivity in field names
+- **Solution**: 
+  - System now handles this automatically with case-insensitive matching
+  - Ensure config uses lowercase snake_case for consistency
+  - System will map `TCS` → `tcs` automatically
+
+**Issue**: Calculated fields not working
+- **Cause**: Calculation formula not clear in prompt or missing base values
+- **Solution**: 
+  - Make calculation formula explicit in extraction prompt
+  - Ensure base values (e.g., Property Gross Charges) are extracted first
+  - Example: "If TCS not mentioned, calculate as Property Gross Charges × 0.005"
   
   # Ubuntu
   sudo apt-get install poppler-utils

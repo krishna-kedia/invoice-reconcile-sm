@@ -210,24 +210,37 @@ class InvoiceReconcileSystem:
             error_message = str(e)
             logger.error(f"Error processing file {file_name}: {error_message}", exc_info=True)
             
-            # Log error
-            self.db_client.insert_log(
-                operation=OperationType.ERROR,
-                status=LogStatus.FAILURE,
-                file_id=file_id,
-                details={'error': error_message, 'file_name': file_name}
-            )
+            # Ensure file status is updated to FAILED, even if other operations fail
+            try:
+                # Log error
+                self.db_client.insert_log(
+                    operation=OperationType.ERROR,
+                    status=LogStatus.FAILURE,
+                    file_id=file_id,
+                    details={'error': error_message, 'file_name': file_name}
+                )
+            except Exception as log_error:
+                logger.error(f"Failed to log error for file {file_name}: {str(log_error)}")
             
-            # Update file status
-            max_retries = self.config.system['max_ocr_retries']
-            increment_retry = file_record.ocr_retry_count < max_retries
-            
-            self.db_client.update_file_status(
-                file_id,
-                FileStatus.FAILED,
-                error_message=error_message,
-                increment_retry=increment_retry
-            )
+            # Update file status to FAILED - this MUST succeed
+            try:
+                max_retries = self.config.system['max_ocr_retries']
+                increment_retry = file_record.ocr_retry_count < max_retries
+                
+                self.db_client.update_file_status(
+                    file_id,
+                    FileStatus.FAILED,
+                    error_message=error_message,
+                    increment_retry=increment_retry
+                )
+                logger.info(f"File {file_name} marked as FAILED due to error: {error_message}")
+            except Exception as status_error:
+                # Critical: if status update fails, log it but don't raise
+                # This ensures we don't leave files in PROCESSING state
+                logger.critical(
+                    f"CRITICAL: Failed to update file status to FAILED for {file_name}: {str(status_error)}. "
+                    f"Original error: {error_message}"
+                )
             
             # Re-raise to allow caller to handle
             raise

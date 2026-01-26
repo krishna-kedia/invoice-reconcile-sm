@@ -150,63 +150,84 @@ Return a JSON object with the extracted fields."""
         """
         validated = {}
         field_map = {field['name']: field for field in field_definitions}
+        # Create case-insensitive lookup map
+        field_map_lower = {field['name'].lower(): field['name'] for field in field_definitions}
+        
         # #region agent log
         with open('/Users/krishnagopalkedia/Documents/GitHub/invoice-reconcile-sm/.cursor/debug.log', 'a') as f:
             import json as json_module
             config_field_names = list(field_map.keys())
             extracted_field_names = list(extracted_fields.keys())
-            tcs_in_config = 'TCS' in config_field_names
-            tds_in_config = 'TDS' in config_field_names
+            tcs_in_config = 'tcs' in [f.lower() for f in config_field_names]
+            tds_in_config = 'tds' in [f.lower() for f in config_field_names]
             f.write(json_module.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H7","location":"structured_extractor.py:136","message":"Field name matching","data":{"config_field_names":config_field_names,"extracted_field_names":extracted_field_names,"tcs_in_config":tcs_in_config,"tds_in_config":tds_in_config},"timestamp":int(__import__('time').time()*1000)}) + '\n')
         # #endregion
         
         for field_name, field_value in extracted_fields.items():
-            if field_name not in field_map:
+            # Try exact match first
+            if field_name in field_map:
+                canonical_field_name = field_name
+            # Try case-insensitive match
+            elif field_name.lower() in field_map_lower:
+                canonical_field_name = field_map_lower[field_name.lower()]
+                # #region agent log
+                with open('/Users/krishnagopalkedia/Documents/GitHub/invoice-reconcile-sm/.cursor/debug.log', 'a') as f:
+                    import json as json_module
+                    f.write(json_module.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H7","location":"structured_extractor.py:165","message":"Case-insensitive field match","data":{"extracted_name":field_name,"canonical_name":canonical_field_name},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+                # #endregion
+            else:
                 # Unknown field, keep as-is
                 # #region agent log
                 with open('/Users/krishnagopalkedia/Documents/GitHub/invoice-reconcile-sm/.cursor/debug.log', 'a') as f:
                     import json as json_module
-                    f.write(json_module.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H7","location":"structured_extractor.py:140","message":"Unknown field (not in config)","data":{"field_name":field_name,"field_value":field_value},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+                    f.write(json_module.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H7","location":"structured_extractor.py:172","message":"Unknown field (not in config)","data":{"field_name":field_name,"field_value":field_value},"timestamp":int(__import__('time').time()*1000)}) + '\n')
                 # #endregion
                 validated[field_name] = field_value
                 continue
             
-            field_def = field_map[field_name]
+            field_def = field_map[canonical_field_name]
             field_type = field_def['type']
             
             # Convert based on type
             if field_value is None:
-                validated[field_name] = None
+                validated[canonical_field_name] = None
             elif field_type == 'string':
-                validated[field_name] = str(field_value)
+                validated[canonical_field_name] = str(field_value)
             elif field_type == 'number':
                 try:
                     # Remove any currency symbols or commas
                     if isinstance(field_value, str):
-                        cleaned = field_value.replace(',', '').replace('$', '').strip()
-                        validated[field_name] = float(cleaned)
+                        cleaned = field_value.replace(',', '').replace('$', '').replace('₹', '').strip()
+                        validated[canonical_field_name] = float(cleaned)
                     else:
-                        validated[field_name] = float(field_value)
+                        validated[canonical_field_name] = float(field_value)
                 except (ValueError, TypeError):
-                    raise ValueError(f"Invalid number value for field '{field_name}': {field_value}")
+                    raise ValueError(f"Invalid number value for field '{canonical_field_name}': {field_value}")
             elif field_type == 'date':
                 # Try to parse date
                 if isinstance(field_value, str):
                     try:
                         # Try ISO format first
                         datetime.fromisoformat(field_value.replace('Z', '+00:00'))
-                        validated[field_name] = field_value
+                        validated[canonical_field_name] = field_value
                     except ValueError:
                         # Try other common formats
                         try:
                             dt = datetime.strptime(field_value, '%Y-%m-%d')
-                            validated[field_name] = dt.strftime('%Y-%m-%d')
+                            validated[canonical_field_name] = dt.strftime('%Y-%m-%d')
                         except ValueError:
-                            raise ValueError(f"Invalid date format for field '{field_name}': {field_value}")
+                            raise ValueError(f"Invalid date format for field '{canonical_field_name}': {field_value}")
                 else:
-                    validated[field_name] = field_value
+                    validated[canonical_field_name] = field_value
             else:
                 # Unknown type, keep as-is
-                validated[field_name] = field_value
+                validated[canonical_field_name] = field_value
+        
+        # Ensure all config fields are present in validated output (set to None if missing)
+        for field_def in field_definitions:
+            field_name = field_def['name']
+            if field_name not in validated:
+                # Field not extracted, set to None (will be handled as optional if not required)
+                validated[field_name] = None
         
         return validated

@@ -70,7 +70,18 @@ document_types:
       Extract primary guest details (name), booking ID, booked on date,
       check-in date, check-out date, room charges, extra adult/child charges,
       property taxes, service charge, property gross charges, Go-MMT commission,
-      GST on commission, TCD (Tax Collected at Source), and TDS (Tax Deducted at Source).
+      GST on commission, TCS, and TDS.
+      
+      For TCS (Tax Collected at Source): If explicitly mentioned in the document, extract that value. 
+      If not mentioned, calculate TCS as Property Gross Charges × 0.005 (0.5%). 
+      If Property Gross Charges is not available, use null.
+      
+      For TDS (Tax Deducted at Source): If explicitly mentioned in the document, extract that value.
+      If not mentioned, calculate TDS as Property Gross Charges × 0.001 (0.1%).
+      If Property Gross Charges is not available, use null.
+      
+      Return all numeric values as numbers (no currency symbols or commas).
+      Use field names exactly as specified: tcs (lowercase) and tds (lowercase).
 
     fields:
       - name: primary_guest_details

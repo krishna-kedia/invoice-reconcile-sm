@@ -17,6 +17,12 @@ The following features were added after initial implementation:
 
 4. **Custom Main Table Names**: For document types with nested arrays, you can specify a custom main table name using the `main_table` field in config. This allows multiple document types to share the same child tables (e.g., `card_transactions`, `upi_transactions`) while having different main tables.
 
+5. **Robust Status Management**: Files are only marked as "completed" after successful insertion into document-specific tables. If table insertion fails, files are marked as "failed" with error details. Failed files are always properly marked as "failed" and never left in "processing" state.
+
+6. **Case-Insensitive Field Matching**: The extraction system handles case-insensitive field names, so if the LLM returns `TCS`/`TDS` but config specifies `tcs`/`tds`, the system automatically maps them correctly.
+
+7. **Calculated Field Support**: Extraction prompts can instruct the LLM to calculate values when they're not explicitly present in documents (e.g., TCS = Property Gross Charges × 0.5%).
+
 ---
 
 ## 1. Objective
@@ -82,6 +88,11 @@ Supabase (Postgres)
 ├── Raw OCR output
 ├── Structured extraction table (JSONB - audit)
 └── Document-specific tables (normalized columns per document type)
+
+**Status Management**:
+- Files marked as "completed" ONLY after successful insertion into document-specific tables
+- Files marked as "failed" if any step fails (OCR, extraction, or table insertion)
+- Files never left in "processing" state - always transition to completed or failed
 
 
 ---
@@ -297,3 +308,51 @@ For the HDFC MPR example above, the system creates:
 - **Efficient Queries**: Query transactions by date, amount, etc. without scanning JSON
 - **Scalability**: Handles documents with hundreds of transactions
 - **Flexibility**: Arrays can be empty (no transactions) or contain many items
+
+### 7.4 Field Extraction Features
+
+#### Case-Insensitive Field Matching
+
+The system automatically handles case-insensitive field names. If the LLM returns uppercase field names (e.g., `TCS`, `TDS`) but your config specifies lowercase (e.g., `tcs`, `tds`), the system automatically maps them correctly.
+
+**Example**:
+- Config: `tcs`, `tds` (lowercase)
+- LLM returns: `TCS`, `TDS` (uppercase)
+- System maps: `TCS` → `tcs`, `TDS` → `tds`
+- Database receives: `tcs`, `tds` (matching config)
+
+#### Calculated Fields
+
+Extraction prompts can instruct the LLM to calculate values when they're not explicitly present in documents. This is useful for fields like TCS/TDS that may need to be calculated from other values.
+
+**Example Prompt**:
+```
+For TCS (Tax Collected at Source): If explicitly mentioned in the document, extract that value. 
+If not mentioned, calculate TCS as Property Gross Charges × 0.005 (0.5%). 
+
+For TDS (Tax Deducted at Source): If explicitly mentioned in the document, extract that value.
+If not mentioned, calculate TDS as Property Gross Charges × 0.001 (0.1%).
+```
+
+**Benefits**:
+- Handles documents where calculated values aren't explicitly stated
+- Ensures consistent data extraction even when document formats vary
+- Allows prompts to specify calculation formulas
+
+#### Complete Field Coverage
+
+The system ensures all fields defined in config are present in the validated output. Missing optional fields are set to `None` instead of being omitted, ensuring consistent data structure for all records.
+
+### 7.5 Status Management
+
+**File Status Lifecycle**:
+1. **pending**: File discovered but not yet processed
+2. **processing**: File is currently being processed (OCR, extraction, table insertion)
+3. **completed**: File successfully processed AND data inserted into document-specific tables
+4. **failed**: Processing failed at any step (OCR, extraction, or table insertion)
+
+**Critical Rules**:
+- Files are **only** marked as "completed" after successful insertion into document-specific tables
+- If table insertion fails, the file is marked as "failed" with error details
+- Files are **never** left in "processing" state - exception handling ensures transition to "failed"
+- Status updates are wrapped in try-except to ensure they always succeed, even if logging fails
