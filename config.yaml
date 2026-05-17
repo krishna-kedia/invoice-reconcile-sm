@@ -1,5 +1,6 @@
 system:
   max_ocr_retries: 3
+  max_parallel_workers: 4      # Number of files processed concurrently
   cron_schedule: "0 2 * * *"  # Daily at 2 AM
 
 connections:
@@ -71,15 +72,14 @@ document_types:
       check-in date, check-out date, room charges, extra adult/child charges,
       property taxes, service charge, property gross charges, Go-MMT commission,
       GST on commission, TCS, and TDS.
-      
-      For TCS (Tax Collected at Source): If explicitly mentioned in the document, extract that value. 
-      If not mentioned, calculate TCS as Property Gross Charges × 0.005 (0.5%). 
-      If Property Gross Charges is not available, use null.
-      
-      For TDS (Tax Deducted at Source): If explicitly mentioned in the document, extract that value.
-      If not mentioned, calculate TDS as Property Gross Charges × 0.001 (0.1%).
-      If Property Gross Charges is not available, use null.
-      
+
+      IMPORTANT - TCS and TDS extraction:
+      - TCS (Tax Collected at Source): Look for the line item labeled "TCS@ 0.5%" in the document.
+        Extract the exact amount shown next to this label. Do NOT calculate it yourself.
+      - TDS (Tax Deducted at Source): Look for the line item labeled "TDS@0.1%" in the document.
+        Extract the exact amount shown next to this label. Do NOT calculate it yourself.
+      - If either TCS or TDS line item is not present in the document, use null for that field.
+
       Return all numeric values as numbers (no currency symbols or commas).
       Use field names exactly as specified: tcs (lowercase) and tds (lowercase).
 

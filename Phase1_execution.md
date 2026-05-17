@@ -55,6 +55,7 @@ This document provides a comprehensive overview of the Phase 1 implementation of
 18. ✅ Robust status management (completed only after successful table insert)
 19. ✅ Case-insensitive field name matching
 20. ✅ Calculated field extraction support
+21. ✅ Excel direct integration (direct database insertion for structured Excel files)
 
 ### Technology Stack
 
@@ -94,6 +95,7 @@ invoice-reconcile-sm/
 │   │   ├── models.py             # Data models and enums
 │   │   ├── client.py             # Supabase client wrapper
 │   │   ├── table_manager.py      # Document-specific table management
+│   │   ├── excel_inserter.py     # Direct Excel to database inserter
 │   │   └── migrations/
 │   │       ├── 001_initial_schema.sql  # Database schema
 │   │       └── 002_document_type_tables.sql  # Document-specific tables
@@ -107,7 +109,7 @@ invoice-reconcile-sm/
 │   │   ├── __init__.py
 │   │   ├── base.py               # Base processor interface
 │   │   ├── ocr_processor.py      # OpenAI Vision OCR
-│   │   ├── excel_processor.py    # Excel/CSV parser
+│   │   ├── excel_processor.py    # Excel/CSV parser (with direct insertion support)
 │   │   └── factory.py            # Processor factory
 │   │
 │   ├── extractors/               # Structured extraction
@@ -116,6 +118,7 @@ invoice-reconcile-sm/
 │   │
 │   └── utils/                    # Utilities
 │       ├── __init__.py
+│       ├── date_parser.py        # Excel date parsing utility
 │       ├── logging.py           # Logging setup
 │       ├── retry.py              # Retry decorators
 │       └── pdf_decryptor.py      # PDF password removal service
@@ -374,12 +377,20 @@ status = FileStatus.PENDING
 5. **Document-Specific Table Operations**:
    - `insert_document_extraction()`: Insert into document-specific normalized table(s) - supports main table + child tables for arrays
    - `insert_extraction()`: Updated to insert into both extractions table (JSONB) and document-specific table(s)
-   - Both methods accept:
+   - `insert_excel_rows_direct()`: Direct insertion of Excel rows into document-specific tables (bypasses LLM)
+   - All methods accept:
      - `fields_config`: Field definitions from config (needed for array handling)
      - `main_table`: Optional custom main table name (defaults to document_type)
    - Automatically handles splitting main fields from array fields
    - Bulk inserts child table records for efficiency
    - **Critical**: Raises exception if table insertion fails, ensuring files are marked as "failed" rather than "completed"
+
+6. **Excel Direct Insertion**:
+   - Uses `ExcelDirectInserter` class for direct Excel → database insertion
+   - Validates columns against config fields
+   - Converts types (date, number, string)
+   - Tracks row_number for each Excel row
+   - Handles errors per row (continues on error, collects errors)
 
 **Design Decisions**:
 - Uses Supabase Python client (not raw SQL)
@@ -600,35 +611,31 @@ metadata = result['metadata']
 
 **Key Features**:
 
-1. **File Type Support**:
+1. **process() Method** (LLM path):
+   - Reads Excel/CSV files using pandas
+   - Converts to text representation for LLM extraction
+   - Returns raw text and metadata
+
+2. **extract_data_between_delimiters() Method** (Direct insertion path):
+   - Extracts data rows between delimiter rows (e.g., asterisk rows)
+   - Finds header row between first and second delimiter
+   - Extracts data rows between second and third delimiter
+   - Returns DataFrame with header as column names
+
+3. **normalize_column_names() Method**:
+   - Auto-converts Excel column names to snake_case
+   - Handles special characters, spaces, and formatting
+   - Example: "Withdrawal Amt." → "withdrawal_amt", "Chq./Ref.No." → "chq_ref_no"
+
+4. **Supported Formats**:
    - CSV (pandas)
    - XLSX (pandas + openpyxl)
    - XLS (pandas + xlrd)
 
-2. **Text Extraction**:
-   - Reads into pandas DataFrame
-   - Converts to structured text format
-   - Includes column names
-   - Includes all row data
-
-3. **Metadata**:
-   - Number of rows and columns
-   - Column names
-   - DataFrame shape
-   - Processing method
-
-**Output Format**:
-```
-Columns: col1, col2, col3
-
-Row 1: col1: value1 | col2: value2 | col3: value3
-Row 2: col1: value4 | col2: value5 | col3: value6
-```
-
 **Design Decisions**:
-- Direct parsing (no OCR needed)
-- Preserves structure for LLM extraction
-- Can be extended to extract directly to structured format
+- Supports both LLM extraction (text conversion) and direct insertion (DataFrame)
+- Delimiter detection handles multiple delimiter rows (header separator, data end)
+- Column normalization ensures database compatibility
 
 ---
 
@@ -715,6 +722,14 @@ extracted_fields = result['extracted_fields']
 ---
 
 ### Utilities
+
+#### `src/utils/date_parser.py`
+**Purpose**: Date parsing utility for Excel files
+
+**Features**:
+- `parse_excel_date()`: Parses dates from Excel cells
+- Handles multiple formats: DD/MM/YY, DD-MM-YYYY, Excel serial dates, pandas Timestamps
+- Returns date objects or None if parsing fails
 
 #### `src/utils/logging.py`
 **Purpose**: Structured logging setup
@@ -1139,6 +1154,59 @@ CREATE INDEX IF NOT EXISTS idx_upi_transactions_card_settlement_id ON upi_transa
 - **Arrays can be empty**: System handles missing or empty arrays gracefully
 - **Bulk inserts**: All child records inserted in single operation for efficiency
 
+### Excel Direct Integration
+
+For structured Excel files (e.g., bank statements), the system supports direct database insertion without LLM extraction. This is useful when Excel columns directly map to database fields.
+
+#### Configuration
+
+Add `excel_direct_insert: true` to document type config:
+
+```yaml
+document_types:
+  - document_type: bank_statement
+    drive_folder_id: "${BANK_STATEMENTS}"
+    file_types: [xlsx, xls]
+    excel_direct_insert: true  # Skip LLM, direct insertion
+    
+    fields:
+      - name: date
+        type: date
+        required: true
+      # ... other fields
+```
+
+#### How It Works
+
+1. **Delimiter Detection**: Finds rows with asterisks (`******`) that delimit data sections
+2. **Header Extraction**: Extracts header row between first and second delimiter
+3. **Data Extraction**: Extracts data rows between second and third delimiter
+4. **Column Normalization**: Auto-converts Excel column names to snake_case (e.g., "Withdrawal Amt." → "withdrawal_amt")
+5. **Direct Insertion**: Inserts rows directly into document-specific table with row_number tracking
+
+#### Database Tables
+
+Excel direct insertion creates tables with `row_number` column to track Excel row position:
+
+```sql
+CREATE TABLE bank_statement (
+    id UUID PRIMARY KEY,
+    file_id UUID REFERENCES files(id),
+    date DATE NOT NULL,
+    narration TEXT NOT NULL,
+    -- ... other fields ...
+    row_number INTEGER NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE
+);
+```
+
+#### Benefits
+
+- **Fast Processing**: No LLM API calls for structured data
+- **Cost Effective**: Eliminates LLM costs for simple Excel files
+- **Accurate**: Direct column mapping ensures data integrity
+- **Row Tracking**: `row_number` field tracks original Excel row position
+
 ### Field Extraction Improvements
 
 #### Case-Insensitive Field Matching
@@ -1507,6 +1575,12 @@ pip install -r requirements.txt
    - Prompts can instruct LLM to calculate values when not explicitly present
    - Example: "If TCS not mentioned, calculate as Property Gross Charges × 0.5%"
    - Useful for fields that may or may not be explicitly stated in documents
+
+5. **Excel Direct Insertion**:
+   - Set `excel_direct_insert: true` for structured Excel files
+   - System extracts data between delimiter rows (asterisks)
+   - Auto-converts column names to snake_case
+   - Inserts rows directly into database (no LLM required)
 
 ### Step 7: Test Configuration
 
@@ -2061,7 +2135,9 @@ Phase 1 implementation is **complete** and ready for testing. The system provide
 | `src/drive/client.py` | ~150 | Drive API client | ✅ Complete |
 | `src/drive/discovery.py` | ~120 | File discovery | ✅ Complete |
 | `src/processors/ocr_processor.py` | 143 | OCR processing | ✅ Complete |
-| `src/processors/excel_processor.py` | ~80 | Excel parsing | ✅ Complete |
+| `src/processors/excel_processor.py` | ~240 | Excel parsing with direct insertion | ✅ Complete |
+| `src/database/excel_inserter.py` | ~240 | Direct Excel to DB insertion | ✅ Complete |
+| `src/utils/date_parser.py` | ~80 | Excel date parsing utility | ✅ Complete |
 | `src/processors/factory.py` | ~50 | Processor routing | ✅ Complete |
 | `src/extractors/structured_extractor.py` | ~200 | Field extraction | ✅ Complete |
 | `src/utils/logging.py` | ~40 | Logging setup | ✅ Complete |

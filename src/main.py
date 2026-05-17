@@ -1,6 +1,7 @@
 """Main entry point for invoice reconcile backend system"""
 
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 # Add src directory to path for imports
@@ -93,62 +94,62 @@ class InvoiceReconcileSystem:
             except Exception as e:
                 logger.error(f"Error during discovery for {document_type}: {str(e)}", exc_info=True)
     
-    def process_file(self, file_record) -> None:
+    def process_file(self, file_record, db_client=None, drive_client=None) -> None:
         """Process a single file through the pipeline.
-        
+
         Args:
             file_record: FileRecord instance
+            db_client: Optional DatabaseClient; uses self.db_client if not provided.
+            drive_client: Optional DriveClient; uses self.drive_client if not provided.
+                          Pass per-thread instances when calling from parallel workers —
+                          both httplib2 (Drive) and supabase-py are not thread-safe when shared.
         """
+        db = db_client if db_client is not None else self.db_client
+        drive = drive_client if drive_client is not None else self.drive_client
         file_id = file_record.id
         file_name = file_record.file_name
         file_type = file_record.file_type
         document_type = file_record.document_type
-        
+
         logger.info(f"Processing file: {file_name} (ID: {file_id})")
-        
+
         try:
             # Update status to processing
-            self.db_client.update_file_status(file_id, FileStatus.PROCESSING)
-            
+            db.update_file_status(file_id, FileStatus.PROCESSING)
+
             # Log download start
-            self.db_client.insert_log(
+            db.insert_log(
                 operation=OperationType.DOWNLOAD,
                 status=LogStatus.SUCCESS,
                 file_id=file_id,
                 details={'file_name': file_name}
             )
-            
+
             # Download file from Drive
-            file_content = self.drive_client.download_file(file_record.drive_file_id)
+            file_content = drive.download_file(file_record.drive_file_id)
             logger.info(f"Downloaded file: {file_name} ({len(file_content)} bytes)")
-            
+
             # Get appropriate processor
             processor = self.processor_factory.get_processor(file_type)
             if not processor:
                 raise ValueError(f"No processor available for file type: {file_type}")
-            
+
             # Get document type config for password (if PDF)
             pdf_password = None
             if file_type.lower() == 'pdf':
                 doc_type_config = self.config.get_document_type(document_type)
                 if doc_type_config:
                     pdf_password = doc_type_config.get('pdf_password')
-                    # #region agent log
-                    with open('/Users/krishnagopalkedia/Documents/GitHub/invoice-reconcile-sm/.cursor/debug.log', 'a') as f:
-                        import json
-                        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H3","location":"main.py:135","message":"Password from config","data":{"document_type":document_type,"has_password":pdf_password is not None,"password_length":len(pdf_password) if pdf_password else 0},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-                    # #endregion
-            
+
             # Process file (OCR or direct parse)
             logger.info(f"Processing file with {processor.__class__.__name__}")
-            self.db_client.insert_log(
+            db.insert_log(
                 operation=OperationType.OCR,
                 status=LogStatus.SUCCESS,
                 file_id=file_id,
                 details={'processor': processor.__class__.__name__}
             )
-            
-            # Process with password if provided (for PDFs)
+
             # Only OCRProcessor supports password parameter
             if file_type.lower() == 'pdf' and pdf_password:
                 process_result = processor.process(file_content, file_type, password=pdf_password)
@@ -156,36 +157,34 @@ class InvoiceReconcileSystem:
                 process_result = processor.process(file_content, file_type)
             raw_text = process_result['raw_text']
             ocr_metadata = process_result.get('metadata', {})
-            
+
             logger.info(f"Extracted {len(raw_text)} characters from {file_name}")
-            
+
             # Store OCR output
-            self.db_client.insert_ocr_output(
+            db.insert_ocr_output(
                 file_id=file_id,
                 raw_text=raw_text,
                 ocr_metadata=ocr_metadata
             )
-            
+
             # Get document type config for extraction
             doc_type_config = self.config.get_document_type(document_type)
             if not doc_type_config:
                 raise ValueError(f"Document type config not found: {document_type}")
-            
+
             # Check if Excel file with direct insertion enabled
             excel_direct_insert = doc_type_config.get('excel_direct_insert', False)
-            
+
             if file_type.lower() in ['xlsx', 'xls', 'csv'] and excel_direct_insert:
                 # Direct Excel insertion path (skip LLM)
                 logger.info(f"Processing Excel file with direct insertion for {file_name}")
-                
-                # Extract data between delimiters and normalize columns
+
                 df = processor.extract_data_between_delimiters(file_content, file_type)
                 df = processor.normalize_column_names(df)
-                
+
                 logger.info(f"Extracted {len(df)} rows from Excel file")
-                
-                # Store Excel metadata in ocr_outputs
-                self.db_client.insert_ocr_output(
+
+                db.insert_ocr_output(
                     file_id=file_id,
                     raw_text=f"Excel file with {len(df)} rows",
                     ocr_metadata={
@@ -195,17 +194,15 @@ class InvoiceReconcileSystem:
                         'processing_method': 'excel_direct_insert'
                     }
                 )
-                
-                # Direct insertion
-                result = self.db_client.insert_excel_rows_direct(
+
+                result = db.insert_excel_rows_direct(
                     file_id=file_id,
                     document_type=document_type,
                     df=df,
                     fields_config=doc_type_config['fields']
                 )
-                
-                # Log extraction operation
-                self.db_client.insert_log(
+
+                db.insert_log(
                     operation=OperationType.EXTRACTION,
                     status=LogStatus.SUCCESS if result['success'] else LogStatus.FAILURE,
                     file_id=file_id,
@@ -216,64 +213,58 @@ class InvoiceReconcileSystem:
                         'rows_failed': result.get('rows_failed', 0)
                     }
                 )
-                
-                # Update status
+
                 if result['success']:
                     if result.get('rows_failed', 0) > 0:
                         logger.warning(
                             f"Inserted {result['rows_inserted']} rows, "
                             f"{result['rows_failed']} rows failed: {result.get('errors', [])}"
                         )
-                    self.db_client.update_file_status(file_id, FileStatus.COMPLETED)
+                    db.update_file_status(file_id, FileStatus.COMPLETED)
                     logger.info(f"Successfully processed file: {file_name} ({result['rows_inserted']} rows inserted)")
                 else:
                     error_msg = result.get('errors', [{}])[0].get('error', 'Unknown error') if result.get('errors') else 'Insertion failed'
                     raise ValueError(f"Failed to insert Excel rows: {error_msg}")
             else:
-                # Existing LLM extraction path
-                # Extract structured fields
+                # LLM extraction path
                 logger.info(f"Extracting structured fields for {file_name}")
-                self.db_client.insert_log(
+                db.insert_log(
                     operation=OperationType.EXTRACTION,
                     status=LogStatus.SUCCESS,
                     file_id=file_id,
                     details={'document_type': document_type}
                 )
-                
+
                 extraction_result = self.extractor.extract(
                     raw_text=raw_text,
                     extraction_prompt=doc_type_config['extraction_prompt'],
                     fields=doc_type_config['fields']
                 )
-                
+
                 extracted_fields = extraction_result['extracted_fields']
                 extraction_metadata = extraction_result['metadata']
-                
+
                 logger.info(f"Extracted {len(extracted_fields)} fields from {file_name}")
-                
-                # Store extraction (pass fields_config for array handling and main_table if specified)
-                main_table = doc_type_config.get('main_table')  # Optional custom main table name
-                self.db_client.insert_extraction(
+
+                main_table = doc_type_config.get('main_table')
+                db.insert_extraction(
                     file_id=file_id,
                     document_type=document_type,
                     extracted_fields=extracted_fields,
                     extraction_metadata=extraction_metadata,
-                    fields_config=doc_type_config['fields'],  # Pass fields config for nested arrays
-                    main_table=main_table  # Pass custom main table name if specified
+                    fields_config=doc_type_config['fields'],
+                    main_table=main_table
                 )
-                
-                # Update status to completed
-                self.db_client.update_file_status(file_id, FileStatus.COMPLETED)
+
+                db.update_file_status(file_id, FileStatus.COMPLETED)
                 logger.info(f"Successfully processed file: {file_name}")
-        
+
         except Exception as e:
             error_message = str(e)
             logger.error(f"Error processing file {file_name}: {error_message}", exc_info=True)
-            
-            # Ensure file status is updated to FAILED, even if other operations fail
+
             try:
-                # Log error
-                self.db_client.insert_log(
+                db.insert_log(
                     operation=OperationType.ERROR,
                     status=LogStatus.FAILURE,
                     file_id=file_id,
@@ -281,13 +272,11 @@ class InvoiceReconcileSystem:
                 )
             except Exception as log_error:
                 logger.error(f"Failed to log error for file {file_name}: {str(log_error)}")
-            
-            # Update file status to FAILED - this MUST succeed
+
             try:
                 max_retries = self.config.system['max_ocr_retries']
                 increment_retry = file_record.ocr_retry_count < max_retries
-                
-                self.db_client.update_file_status(
+                db.update_file_status(
                     file_id,
                     FileStatus.FAILED,
                     error_message=error_message,
@@ -295,32 +284,48 @@ class InvoiceReconcileSystem:
                 )
                 logger.info(f"File {file_name} marked as FAILED due to error: {error_message}")
             except Exception as status_error:
-                # Critical: if status update fails, log it but don't raise
-                # This ensures we don't leave files in PROCESSING state
                 logger.critical(
                     f"CRITICAL: Failed to update file status to FAILED for {file_name}: {str(status_error)}. "
                     f"Original error: {error_message}"
                 )
-            
-            # Re-raise to allow caller to handle
+
             raise
     
     def run_processing(self) -> None:
-        """Run processing phase for pending files."""
+        """Run processing phase for pending files in parallel."""
         logger.info("Starting processing phase")
-        
+
         max_retries = self.config.system['max_ocr_retries']
+        max_workers = self.config.system.get('max_parallel_workers', 4)
         pending_files = self.db_client.get_pending_files(max_retries)
-        
-        logger.info(f"Found {len(pending_files)} files to process")
-        
-        for file_record in pending_files:
-            try:
-                self.process_file(file_record)
-            except Exception as e:
-                # Error already logged in process_file
-                logger.error(f"Failed to process file {file_record.file_name}: {str(e)}")
-                continue
+
+        logger.info(f"Found {len(pending_files)} files to process (max_workers={max_workers})")
+
+        if not pending_files:
+            return
+
+        supabase_url = self.config.connections['supabase']['url']
+        supabase_key = self.config.connections['supabase']['key']
+        drive_sa_path = self.config.connections['google_drive']['service_account_path']
+
+        def _worker(file_record):
+            # Each thread gets its own clients — both supabase-py and httplib2 (Drive) are not
+            # thread-safe when a single instance is shared across threads.
+            thread_db = DatabaseClient(supabase_url=supabase_url, supabase_key=supabase_key)
+            thread_drive = DriveClient(service_account_path=drive_sa_path)
+            self.process_file(file_record, db_client=thread_db, drive_client=thread_drive)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_worker, f): f for f in pending_files}
+            completed = 0
+            for future in as_completed(futures):
+                file_record = futures[future]
+                completed += 1
+                try:
+                    future.result()
+                    logger.info(f"[{completed}/{len(pending_files)}] Done: {file_record.file_name}")
+                except Exception as e:
+                    logger.error(f"[{completed}/{len(pending_files)}] Failed: {file_record.file_name} — {e}")
     
     def run(self) -> None:
         """Run the complete workflow: discovery + processing."""

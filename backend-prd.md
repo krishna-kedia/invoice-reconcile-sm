@@ -23,6 +23,8 @@ The following features were added after initial implementation:
 
 7. **Calculated Field Support**: Extraction prompts can instruct the LLM to calculate values when they're not explicitly present in documents (e.g., TCS = Property Gross Charges × 0.5%).
 
+8. **Excel Direct Integration**: For structured Excel files (e.g., bank statements), the system supports direct database insertion without LLM extraction. Excel files with data delimited by asterisk rows are automatically parsed, column names are normalized to snake_case, and rows are inserted directly into document-specific tables. Configure with `excel_direct_insert: true` in config.yaml.
+
 ---
 
 ## 1. Objective
