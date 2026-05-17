@@ -49,7 +49,81 @@ export type SourceTable =
   | "bank_statement"
   | "cash_payments";
 
-export type PaymentMethod = "upi" | "card" | "bank_transfer" | "cash";
+export type PaymentMethod = "upi" | "card" | "bank_transfer" | "cash" | "mmt_payout";
+
+// ---------- MMT Direct Reconcile (Phase M) ----------
+
+export interface MmtReconcileCandidate {
+  booking_id: string;
+  mmt_invoice_id: string;
+  guest_hint: string | null;
+  check_in: string | null;
+  check_out: string | null;
+  created_at: string;
+  is_default: boolean;
+}
+
+export interface MmtReconcileCandidatesResponse {
+  hotel_invoice_booking_id: string | null;
+  hotel_invoice_guest_name: string | null;
+  default_booking_id: string | null;
+  match_type: "booking_id" | "guest_name" | "none";
+  candidates: MmtReconcileCandidate[];
+}
+
+export interface MmtInvoiceRow {
+  id: string;
+  booking_id: string;
+  room_charges: number;
+  extra_adult_child_charges: number;
+  property_taxes: number;
+  service_charge: number;
+  property_gross_charges: number;
+  go_mmt_commission: number;
+  gst_on_commission: number;
+  tcs: number | null;
+  tds: number | null;
+  reconciled_at: string | null;
+  reconciled_link_id: string | null;
+  primary_guest_details: string | null;
+  check_in: string | null;
+  check_out: string | null;
+  booked_on: string | null;
+}
+
+export interface MmtBookingsPayoutRow {
+  id: string;
+  transaction_no: string;
+  booking_id: string;
+  payable: number;
+  original_cost: number | null;
+  client_name: string | null;
+  hotel_name: string | null;
+  reconciled_at: string | null;
+  reconciled_link_id: string | null;
+}
+
+export interface BankStatementMatch {
+  id: string;
+  date: string;
+  value_dt: string;
+  chq_ref_no: string | null;
+  narration: string;
+  deposit_amt: number | null;
+  used_amount: number;
+  remaining: number;
+}
+
+export interface MmtReconcileDetail {
+  mmt_invoice: MmtInvoiceRow;
+  mmt_bookings_payout: MmtBookingsPayoutRow;
+  bank_statement: BankStatementMatch;
+  computed_payable: number;
+  payout_payable: number;
+  amount_diff: number;
+  match_within_tolerance: boolean;
+  tolerance_rupees: number;
+}
 
 export interface ReconciliationLink {
   id: string;

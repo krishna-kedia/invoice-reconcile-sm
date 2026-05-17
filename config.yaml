@@ -1,6 +1,6 @@
 system:
   max_ocr_retries: 3
-  max_parallel_workers: 4      # Number of files processed concurrently
+  max_parallel_workers: 8      # Number of files processed concurrently
   cron_schedule: "0 2 * * *"  # Daily at 2 AM
 
 connections:
@@ -131,6 +131,7 @@ document_types:
     file_types: [pdf, jpg, jpeg, png, heic]
     main_table: card_settlement  # Custom main table name (defaults to document_type if not specified)
     pdf_password: "AYH059"
+    use_vision: true  # Always use Vision API — pypdf misses table structure in HDFC MPR PDFs
     extraction_prompt: |
       You are reading an HDFC Bank Merchant Payment Report (MPR) PDF. Your job is to extract structured financial and transaction data. This document follows a consistent layout. Use the instructions below to identify where each required field appears.
 
@@ -245,10 +246,10 @@ document_types:
   - document_type: bank_statement
     drive_folder_id: "${BANK_STATEMENTS}"
     file_types: [xlsx, xls]
-    
+
     # Direct Excel insertion (no LLM)
     excel_direct_insert: true
-    
+
     fields:
       - name: date
         type: date
@@ -271,3 +272,17 @@ document_types:
       - name: closing_balance
         type: number
         required: true
+  - document_type: mmt_payout
+    drive_folder_id: "${MMT_PAYOUTS}"
+    file_types: [json]
+
+    # Direct JSON insertion — bypasses LLM. Parses the MMT payout JSON and
+    # populates mmt_payouts (one row per transfer) and mmt_bookings_payout
+    # (one row per booking). Idempotent via ON CONFLICT DO NOTHING.
+    json_direct_insert: true
+
+    # Field list intentionally empty — the json_direct_insert path uses a
+    # hand-written parser/inserter that knows the JSON shape. The table-manager
+    # auto-DDL logic is skipped because the migration created both tables
+    # explicitly with FKs, indexes and a composite UNIQUE constraint.
+    fields: []

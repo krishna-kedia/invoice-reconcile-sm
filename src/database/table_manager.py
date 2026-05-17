@@ -179,15 +179,27 @@ def ensure_table_exists(db_client, document_type: str, fields: List[Dict[str, An
 
 def ensure_all_tables_exist(config, db_client) -> None:
     """Ensure all document type tables exist based on config.
-    
+
+    Document types that use bespoke ingestion paths (`json_direct_insert`)
+    own their schema via explicit migrations and a hand-written inserter, so
+    they are skipped — the auto-DDL logic doesn't fit (e.g., composite PKs,
+    multi-table fan-out).
+
     Args:
         config: Config instance with document_types
         db_client: DatabaseClient instance
     """
     for doc_type_config in config.document_types:
         document_type = doc_type_config['document_type']
-        fields = doc_type_config['fields']
-        
+        fields = doc_type_config.get('fields') or []
+
+        # Skip document types that manage their own schema/inserter.
+        if doc_type_config.get('json_direct_insert'):
+            continue
+        if not fields:
+            # Nothing to auto-create — skip silently.
+            continue
+
         try:
             ensure_table_exists(db_client, document_type, fields)
         except NotImplementedError as e:

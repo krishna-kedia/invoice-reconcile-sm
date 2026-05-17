@@ -1,4 +1,4 @@
-<!-- Last updated: 2026-05-17 13:22 -->
+<!-- Last updated: 2026-05-17 21:30 -->
 
 # Product Requirements Document
 ## Hotel Invoice Reconciliation App — V1 (Walk-in Invoices)
@@ -514,6 +514,227 @@ None. All resolved.
 
 ---
 
+## Addendum — MMT Payouts ingestion (2026-05-17)
+
+This addendum adds a new data-pipeline document type to the existing OCR backend (`src/`). It does **not** change the V1 reconciliation app surface.
+
+### Goal
+The hotel receives one JSON file per MMT payout in a dedicated Google Drive folder. Each file is the parsed body of one MMT settlement email, containing:
+- A single `transfer` object — the bank-leg of the payout (one bank credit).
+- A `bookings[]` array — the individual MMT bookings included in that payout.
+
+V1 ingestion needs to:
+1. Discover JSON files in the Drive folder `1fhefZhFL81mth-UyeZonug0cfVxUX5-p`.
+2. Parse the JSON deterministically (no LLM).
+3. Insert one row into `mmt_payouts` and N rows into `mmt_bookings_payout`.
+4. Be idempotent — re-running on the same file inserts nothing new.
+
+### FR-053 — `mmt_payouts` table (the bank-leg of a payout)
+Columns:
+- `transaction_no TEXT PRIMARY KEY` — `transfer.transactionNo` (natural key).
+- `file_id UUID NOT NULL REFERENCES files(id) ON DELETE CASCADE`.
+- `subject_ref TEXT` — `subjectRef` (email subject ref like `HTLDOM0006832`).
+- `email_date TIMESTAMPTZ` — `emailDate`.
+- `exported_at TIMESTAMPTZ` — `exportedAt`.
+- `processing_date TEXT NULL` — `transfer.processingDate` (often empty in source).
+- `total_amount NUMERIC(15,2) NOT NULL` — `transfer.totalAmount`.
+- `bank_name TEXT` — `transfer.bankName`.
+- `beneficiary TEXT` — `transfer.beneficiary`.
+- `account_number TEXT` — `transfer.accountNumber`.
+- `transaction_date DATE` — `transfer.transactionDate` (`DD/MM/YYYY` in source).
+- `total_bookings INTEGER` — `summary.totalBookings`.
+- `total_payable_amount NUMERIC(15,2)` — `summary.totalPayableAmount`.
+- `created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`.
+
+Indexes: `(file_id)`, `(transaction_date)`, `(subject_ref)`.
+
+### FR-054 — `mmt_bookings_payout` table (one row per booking in a payout)
+Columns:
+- `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`.
+- `file_id UUID NOT NULL REFERENCES files(id) ON DELETE CASCADE`.
+- `transaction_no TEXT NOT NULL REFERENCES mmt_payouts(transaction_no) ON DELETE CASCADE`.
+- `booking_id TEXT NOT NULL` — `bookings[].bookingId` (same format as `mmt_invoice.booking_id`).
+- `booking_pnr TEXT` — `bookings[].bookingPNR`.
+- `client_name TEXT` — `bookings[].clientName`.
+- `hotel_name TEXT` — `bookings[].hotelName`.
+- `hotel_city TEXT` — `bookings[].hotelCity`.
+- `check_in DATE` — `bookings[].checkIn`.
+- `check_out DATE` — `bookings[].checkOut`.
+- `original_cost NUMERIC(15,2)` — `bookings[].originalCost`.
+- `payable NUMERIC(15,2)` — `bookings[].payable`.
+- `booking_type TEXT` — `bookings[].bookingType`.
+- `brand TEXT` — `bookings[].brand`.
+- `created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`.
+
+Constraints / indexes:
+- `UNIQUE (transaction_no, booking_id)` — same booking in same payout exactly once. (A booking can legitimately appear in two different payouts; that's allowed.)
+- Index on `(booking_id)` — supports cross-reference to `mmt_invoice.booking_id`.
+- Index on `(transaction_no)` — FK lookups.
+- Index on `(check_in)`, `(check_out)` — reporting.
+
+### FR-055 — JSON processor (new)
+A new `JsonProcessor` class in `src/processors/json_processor.py` that:
+- Implements the `BaseProcessor` interface.
+- Supports file extension `json`.
+- `process()` parses bytes → dict and returns `raw_text = json.dumps(obj, indent=2)` plus metadata.
+- Registered in `ProcessorFactory` so `factory.get_processor("json")` returns it.
+
+### FR-056 — `json_direct_insert` pipeline path
+In `src/main.py`, after the OCR output is stored, add a branch analogous to `excel_direct_insert`:
+- Trigger when `file_type == 'json'` AND `doc_type_config.json_direct_insert == True`.
+- The processor returns the parsed dict; the pipeline calls a new DB method `db.insert_mmt_payout_json(file_id, parsed_json)` that:
+  - Parses `transfer.transactionDate` (`DD/MM/YYYY`) into ISO date.
+  - Inserts `mmt_payouts` row with `ON CONFLICT (transaction_no) DO NOTHING`.
+  - Inserts all `bookings[]` rows with `ON CONFLICT (transaction_no, booking_id) DO NOTHING`.
+  - Returns `{success, payout_inserted, bookings_inserted, bookings_skipped, errors}`.
+- On full success → file status = `completed`. On any exception → file status = `failed` (matches existing pattern).
+
+### FR-057 — Config wiring
+A new entry in `config.yaml`:
+```yaml
+  - document_type: mmt_payout
+    drive_folder_id: "${MMT_PAYOUTS}"
+    file_types: [json]
+    json_direct_insert: true
+    # fields list kept for table-manager compatibility; tables created by migration, not auto-DDL.
+    fields: []
+```
+And in `.env`:
+```
+MMT_PAYOUTS=1fhefZhFL81mth-UyeZonug0cfVxUX5-p
+```
+
+### FR-058 — Drive discovery for JSON files
+`drive/client.py` MIME-type map already supports common MIME types but JSON is missing. Add `'json' → 'application/json'`. Also ensure the discovery query falls through to the `name contains '.json'` filter if MIME-by-type returns nothing (Drive sometimes uploads `.json` as `text/plain`).
+
+### Non-functional
+- **Idempotency:** running the pipeline twice over the same file produces no duplicates and is not an error. (Existing discovery already skips known `drive_file_id`s; the `ON CONFLICT` is the second layer of defence.)
+- **Atomicity:** payout + all its bookings are inserted in a single Supabase transaction-ish call sequence. Since supabase-py does not expose multi-statement transactions cleanly, the order is: insert payout first; if that succeeds (or hits conflict on an existing payout with identical body), insert bookings. A failure on bookings leaves the payout row intact and the file is marked `failed` so a retry replays cleanly under the `ON CONFLICT` guard.
+- **No FK to `mmt_invoice`:** the payout JSON often arrives before the MMT invoice PDF is OCR'd, so a hard FK would cause race failures. A best-effort join in views/queries via `mmt_bookings_payout.booking_id = mmt_invoice.booking_id` is sufficient.
+
+### Out of scope for this addendum
+- UI for browsing payouts (V1.5).
+- Reconciling payouts to `mmt_invoice` / `bank_statement` (V1.5 — that's the OTA-leg reconciliation deferred earlier).
+- A separate `mmt_payout_reconciliation_links` table.
+
+---
+
+## Addendum — MMT/Goibibo invoice reconciliation via payout (2026-05-17)
+
+This addendum brings MMT/Goibibo invoices **into the V1 reconciliation surface** (they were originally read-only). It adds a new, dedicated reconciliation panel that operates against the `mmt_invoice` + `mmt_bookings_payout` + `bank_statement` chain — co-existing with the existing UPI/Card/BankTransfer/Cash picker for those invoices.
+
+### Goal
+Operator opens a `hotel_invoice` where `source IN ('MakeMyTrip','Goibibo')`. Alongside the regular Add Payment panel, a second **"MMT Payout Reconcile"** panel appears that:
+1. Lets the user pick a `booking_id` from `mmt_invoice` (dropdown, uniques, unreconciled-only).
+2. Shows the line-item breakdown from `mmt_invoice` on one side, the `payable` from `mmt_bookings_payout` on the other.
+3. Computes the expected payable from `mmt_invoice` line items via the formula
+   `room_charges + extra_adult_child_charges + property_taxes − (go_mmt_commission + gst_on_commission + tcs + tds)`.
+4. Allows **direct edits** of both sides (persists to `mmt_invoice` and `mmt_bookings_payout` rows immediately) until amounts match within ₹1.
+5. Locates the corresponding `bank_statement` row via case-insensitive substring match `chq_ref_no ILIKE '%' || mmt_bookings_payout.transaction_no || '%'`.
+6. On Reconcile: inserts one `reconciliation_links` row (`source_table='bank_statement'`, `payment_method='mmt_payout'`, `amount_applied = payable`), marks `mmt_invoice.reconciled_at` + `mmt_bookings_payout.reconciled_at`, and runs the same validation/lock/audit chain as the standard reconcile path.
+
+The existing `rpc_admin_reverse_reconciliation` / approval flow handles un-reconciliation transparently because reconciliation is recorded via `reconciliation_links` exactly like every other method.
+
+### FR-059 — Source-channel scoping
+- The MMT Payout Reconcile panel renders ONLY when the open `hotel_invoice.source` is exactly `'MakeMyTrip'` or `'Goibibo'`. For all other sources, the panel is not rendered.
+- For these invoices, the existing AddPaymentPanel (UPI/Card/BankTransfer/Cash) is **also rendered**. Operator chooses which to use.
+
+### FR-060 — Schema additions
+- Add to `mmt_invoice`:
+  - `reconciled_at TIMESTAMPTZ NULL`
+  - `reconciled_link_id UUID NULL REFERENCES reconciliation_links(id) ON DELETE SET NULL`
+- Add to `mmt_bookings_payout`:
+  - `reconciled_at TIMESTAMPTZ NULL`
+  - `reconciled_link_id UUID NULL REFERENCES reconciliation_links(id) ON DELETE SET NULL`
+- Add `'mmt_payout'` to the allowed values of `reconciliation_links.payment_method` CHECK constraint.
+- Add `'mmt_payout'` to the allowed values of `payment_source_config.payment_method` CHECK constraint (so it can appear in the existing Source Config matrix; mapping is conceptual — the actual data source is always `bank_statement`).
+- Seed one row into `payment_source_config`: `('mmt_payout','bank_statement', true)`.
+
+### FR-061 — `rpc_get_mmt_reconcile_candidates(p_hotel_invoice_id uuid)` (RPC)
+Returns, as JSON:
+- `default_booking_id` — the `hotel_invoice.booking_id` if a matching `mmt_invoice` row exists (unreconciled), else null.
+- `available_booking_ids` — array of `{booking_id, guest_name_hint, mmt_invoice_id}` for all `mmt_invoice` rows where `reconciled_at IS NULL`, ordered with the matching booking_id first if present, then by `mmt_invoice.created_at DESC`.
+
+### FR-062 — `rpc_get_mmt_reconcile_detail(p_booking_id text)` (RPC)
+Returns, as JSON:
+- The full `mmt_invoice` row (latest by `created_at` if duplicates) — if none exists, error `MMT_INVOICE_NOT_FOUND` with friendly message "Invoice hasn't been processed yet. Please upload the MMT invoice PDF first."
+- The matched `mmt_bookings_payout` row (filtered by `booking_id` AND `reconciled_at IS NULL`) — if zero rows, error `MMT_PAYOUT_NOT_FOUND` with message "Payment not in system yet. The MMT payout for this booking hasn't been received."
+- If multiple unreconciled `mmt_bookings_payout` rows exist with that booking_id, error `MMT_PAYOUT_AMBIGUOUS` with the list.
+- The matched `bank_statement` row: `WHERE chq_ref_no ILIKE '%' || payout.transaction_no || '%'`. Zero matches → error `MMT_BANK_NOT_FOUND`. >1 matches → error `MMT_BANK_AMBIGUOUS` with the list.
+- Computed payable from formula vs. `mmt_bookings_payout.payable` — also returned with `match_within_tolerance` boolean (|diff| ≤ ₹1).
+- Bank statement `deposit_amt`, `used_amount` (from existing remaining view), and `remaining` — caller uses this to know if the row has enough left.
+
+### FR-063 — `rpc_update_mmt_invoice_fields(p_id uuid, p_fields jsonb)` (RPC)
+- Operator/admin can update any of `room_charges`, `extra_adult_child_charges`, `property_taxes`, `service_charge`, `go_mmt_commission`, `gst_on_commission`, `tcs`, `tds` on `mmt_invoice`.
+- Persists; writes audit row (`action='mmt_invoice.update'`, before/after).
+- Rejected if `mmt_invoice.reconciled_at IS NOT NULL`.
+
+### FR-064 — `rpc_update_mmt_bookings_payout_fields(p_id uuid, p_fields jsonb)` (RPC)
+- Operator/admin can update `payable` on `mmt_bookings_payout`.
+- Persists; writes audit row.
+- Rejected if `mmt_bookings_payout.reconciled_at IS NOT NULL`.
+
+### FR-065 — `rpc_reconcile_mmt_invoice(p_hotel_invoice_id uuid, p_mmt_invoice_id uuid, p_mmt_bookings_payout_id uuid, p_bank_statement_id uuid)` (RPC, ACID)
+Atomic operation. All-or-nothing.
+Validations (raise human-readable Postgres exception on any failure):
+1. Caller is operator or admin.
+2. `hotel_invoice.source ∈ ('MakeMyTrip','Goibibo')`.
+3. `mmt_invoice.reconciled_at IS NULL` (SELECT FOR UPDATE).
+4. `mmt_bookings_payout.reconciled_at IS NULL` (SELECT FOR UPDATE).
+5. `mmt_bookings_payout.booking_id = mmt_invoice.booking_id`.
+6. Computed payable from `mmt_invoice` formula matches `mmt_bookings_payout.payable` within ₹1.
+7. `bank_statement.chq_ref_no ILIKE '%' || mmt_bookings_payout.transaction_no || '%'` (lock the row).
+8. `bank_statement.deposit_amt - used = remaining`, and `remaining ≥ mmt_bookings_payout.payable` (with ₹1 tolerance).
+9. Sum of all existing `reconciliation_links.amount_applied` for this `hotel_invoice` PLUS the new `payable` does NOT exceed `hotel_invoice.grand_total` by more than 5% — otherwise hard error (re-uses BR-006).
+   - If 0 < overage ≤ 5%, allow but caller must pass `p_confirm_overpay=true`; sentinel `OVERPAY_CONFIRMATION_REQUIRED` raised otherwise.
+   - If underpay (linked_total < grand_total after this save), allow but caller must pass `p_confirm_partial=true`; sentinel `PARTIAL_CONFIRMATION_REQUIRED` raised otherwise.
+
+Effects on success:
+- Insert one row into `reconciliation_links`: `source_table='bank_statement'`, `source_id=p_bank_statement_id`, `payment_method='mmt_payout'`, `amount_applied=payable`, `created_by=auth.uid()`.
+- `UPDATE mmt_invoice SET reconciled_at=now(), reconciled_link_id=<new>` WHERE id=p_mmt_invoice_id.
+- `UPDATE mmt_bookings_payout SET reconciled_at=now(), reconciled_link_id=<new>` WHERE id=p_mmt_bookings_payout_id.
+- Recompute `hotel_invoice.reconciliation_status` via existing `fn_recompute_invoice_status`.
+- Create `discrepancies` row if overpay branch taken (existing pattern).
+- Audit row written (action `reconcile.create.mmt`, `before_state` includes the matched IDs and computed amounts).
+
+Note on un-reconciliation: when `rpc_admin_reverse_reconciliation` (or approved unreconcile-link request) deletes the `reconciliation_links` row, the `ON DELETE SET NULL` on `reconciled_link_id` clears the back-pointer automatically. A small trigger (`trg_mmt_clear_reconciled_at_on_link_delete`) on `reconciliation_links` AFTER DELETE clears `reconciled_at` on the matched `mmt_invoice` and `mmt_bookings_payout` rows so they become available again.
+
+### FR-066 — UI: MmtReconcilePanel
+- Rendered on `invoices/[id]` ONLY when `hotel_invoice.source ∈ ('MakeMyTrip','Goibibo')`.
+- Placed BELOW the existing AddPaymentPanel (visually distinct heading: "MMT Payout Reconcile").
+- States:
+  - **No booking_id selected yet** → dropdown of candidates from FR-061; helper text "Pick the MMT booking ID for this invoice."
+  - **Loading** → spinner on detail card.
+  - **MMT_INVOICE_NOT_FOUND** → amber inline card with explanation + link "Upload invoice via OCR queue" (no nav target needed in V1, just textual).
+  - **MMT_PAYOUT_NOT_FOUND** → amber card: "Payment not in system yet."
+  - **MMT_BANK_NOT_FOUND** → amber card: "No bank credit found matching this payout's transaction number."
+  - **MMT_BANK_AMBIGUOUS / MMT_PAYOUT_AMBIGUOUS** → red card with bullet list of matches and "Resolve with admin before proceeding."
+  - **Success state (all four sides loaded)** → two-column layout:
+    - Left: editable fields for `mmt_invoice` (formula fields only) + computed-payable readout at bottom.
+    - Right: editable `payable` for `mmt_bookings_payout` + transaction_no readout.
+    - Between them: green check + "Amounts match (₹X)" or red X + "Amounts differ by ₹Y. Edit either side to match."
+    - Below: callout card "Bank statement: ₹X deposit on YYYY-MM-DD (chq ref: ZZZ). Remaining after this knockoff: ₹W."
+    - "Reconcile" button (primary). Disabled until amounts match within ₹1.
+- On Reconcile click: call `rpc_reconcile_mmt_invoice`. Handle `PARTIAL_CONFIRMATION_REQUIRED` / `OVERPAY_CONFIRMATION_REQUIRED` sentinels with the same dialog pattern used in `AddPaymentPanel`.
+- Field edits trigger debounced (400ms) `rpc_update_mmt_invoice_fields` / `rpc_update_mmt_bookings_payout_fields` calls; refetch the detail RPC after success so the match indicator updates.
+
+### Business rules (this feature)
+- **BR-015** MMT Payout Reconcile applies only to `hotel_invoice.source ∈ ('MakeMyTrip','Goibibo')`.
+- **BR-016** Each `mmt_invoice.id` and each `mmt_bookings_payout.id` may participate in at most one active reconciliation at a time (enforced via `reconciled_at` UNIQUE-ish check and the `SELECT FOR UPDATE` in the RPC).
+- **BR-017** Bank-statement substring match: `chq_ref_no ILIKE '%transaction_no%'`. Zero or >1 matches is a hard error.
+- **BR-018** Field edits on `mmt_invoice` / `mmt_bookings_payout` are direct (no approval queue) and audit-logged.
+- **BR-019** ₹1 rounding tolerance for amount match.
+- **BR-020** Computed payable formula = `room_charges + extra_adult_child_charges + property_taxes − (go_mmt_commission + gst_on_commission + tcs + tds)`. `service_charge` is intentionally excluded.
+- **BR-021** Re-reconciliation: a booking_id whose `mmt_invoice.reconciled_at IS NOT NULL` (or its payout's `reconciled_at IS NOT NULL`) is excluded from the dropdown.
+- **BR-022** Un-reconciliation: handled by the existing reverse/un-reconcile flow. `ON DELETE SET NULL` on the reconciled-link FK + AFTER DELETE trigger clears `reconciled_at` on both linked rows.
+
+### Out of scope for this addendum
+- Multi-payout (split) reconciliation of a single mmt_invoice.
+- Reconciling `mmt_invoice` rows whose corresponding `hotel_invoice` doesn't exist yet (the entry point is always a `hotel_invoice`).
+- Auto-suggesting a booking_id beyond the simple `hotel_invoice.booking_id ↔ mmt_invoice.booking_id` match.
+
+---
+
 ## Decisions Log
 
 | Date | Decision | Rationale |
@@ -535,3 +756,15 @@ None. All resolved.
 | 2026-05-17 | "Payment link" = one row in `reconciliation_links`. Removing after save requires admin approval (for operator). | Clarification per user. |
 | 2026-05-17 | Admin Home dashboard (lightweight, 8 tiles) included in V1 | User-confirmed. |
 | 2026-05-17 | Users provisioned manually (no self-signup, no admin "create user" UI) in V1 | User-specified. |
+| 2026-05-17 | MMT payout JSON ingested as a new `mmt_payout` document type with `json_direct_insert: true` — no LLM, deterministic parse | Pattern mirrors `excel_direct_insert`; JSON is already structured. |
+| 2026-05-17 | `mmt_payouts.transaction_no` is the natural PK; `mmt_bookings_payout` uses `UNIQUE(transaction_no, booking_id)` for dedup | One bank-transaction-ID per payout; a booking can be in at most one payout (typically) but two payouts is allowed (refunds/adjustments). |
+| 2026-05-17 | No FK from `mmt_bookings_payout.booking_id` to `mmt_invoice.booking_id` | OCR of invoice PDFs and ingestion of payout JSONs race; an index suffices for join performance. |
+| 2026-05-17 | Use `INSERT ... ON CONFLICT DO NOTHING` for both inserts | Makes re-runs idempotent without a separate "seen" check. |
+| 2026-05-17 | RLS disabled on `mmt_payouts` / `mmt_bookings_payout` (pipeline tables, like other extraction tables) | Existing pattern — only V1 reconciliation tables have RLS on. |
+| 2026-05-17 | MMT-reconcile panel co-exists with the standard AddPaymentPanel for `source IN ('MakeMyTrip','Goibibo')` — not a replacement | User-specified; some MMT invoices may settle outside the payout flow. |
+| 2026-05-17 | MMT field edits (mmt_invoice formula fields, payout payable) persist directly with no approval gate | User-specified; pipeline tables are outside the approval boundary. |
+| 2026-05-17 | `service_charge` intentionally excluded from the MMT payable formula | User-confirmed; MMT does not pay service charge through to hotel. |
+| 2026-05-17 | Bank match by case-insensitive substring `chq_ref_no ILIKE '%transaction_no%'` | User-specified. Zero or >1 matches = hard error. |
+| 2026-05-17 | Single `reconciliation_links` row per MMT reconcile (`source_table='bank_statement'`, `payment_method='mmt_payout'`) — no new link rows for mmt_invoice/payout | Keeps existing remaining/locking/audit logic untouched. |
+| 2026-05-17 | New `reconciled_at` + `reconciled_link_id` columns on both `mmt_invoice` and `mmt_bookings_payout` | Fast dropdown filtering + clean back-pointer for un-reconcile cascade. |
+| 2026-05-17 | V1 of this feature is one-to-one only (one mmt_invoice ↔ one mmt_bookings_payout ↔ one bank_statement) | Multi-payout split deferred. |

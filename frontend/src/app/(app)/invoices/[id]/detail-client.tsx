@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -18,6 +19,7 @@ import Link from "next/link";
 import type {
   HotelInvoice, NewLinkInput, PaymentMethod, ReconciliationLink, SourceTable, TransactionRow, AuditLogRow
 } from "@/lib/types";
+import { MmtReconcilePanel } from "./mmt-reconcile-panel";
 
 const METHODS: { value: PaymentMethod; label: string }[] = [
   { value: "upi", label: "UPI" },
@@ -25,6 +27,9 @@ const METHODS: { value: PaymentMethod; label: string }[] = [
   { value: "bank_transfer", label: "Bank Transfer" },
   { value: "cash", label: "Cash" },
 ];
+
+const isMmtSource = (source: string | null | undefined) =>
+  source === "MakeMyTrip" || source === "Goibibo";
 
 export function InvoiceDetailClient({
   invoice, currentUserId, currentRole,
@@ -58,8 +63,42 @@ export function InvoiceDetailClient({
   });
 
   const inv = invQ.data!;
+  const isMMT = isMmtSource(inv.source);
+
+  // For MMT/Goibibo invoices, fetch the mmt_invoice row to compute net receivable
+  const mmtInvQ = useQuery({
+    queryKey: ["mmt_invoice_for", inv.booking_id],
+    enabled: isMMT && !!inv.booking_id,
+    queryFn: async () => {
+      const { data } = await supabase
+        .from("mmt_invoice")
+        .select("room_charges,extra_adult_child_charges,property_taxes,go_mmt_commission,gst_on_commission,tcs,tds")
+        .eq("booking_id", inv.booking_id)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .single();
+      return data;
+    },
+  });
+
+  const netReceivable: number | null = React.useMemo(() => {
+    if (!isMMT || !mmtInvQ.data) return null;
+    const d = mmtInvQ.data;
+    return (
+      Number(d.room_charges ?? 0) +
+      Number(d.extra_adult_child_charges ?? 0) +
+      Number(d.property_taxes ?? 0) -
+      Number(d.go_mmt_commission ?? 0) -
+      Number(d.gst_on_commission ?? 0) -
+      Number(d.tcs ?? 0) -
+      Number(d.tds ?? 0)
+    );
+  }, [isMMT, mmtInvQ.data]);
+
   const linkedTotal = (linksQ.data || []).reduce((s, l) => s + Number(l.amount_applied), 0);
-  const outstanding = Number(inv.grand_total) - linkedTotal;
+  // For MMT invoices use net receivable as the reconciliation target; fall back to grand_total
+  const reconciliationTarget = netReceivable ?? Number(inv.grand_total);
+  const outstanding = reconciliationTarget - linkedTotal;
 
   return (
     <div className="space-y-4">
@@ -117,9 +156,31 @@ export function InvoiceDetailClient({
               <Field label="CGST" value={formatINR(inv.cgst)} />
               <Field label="SGST" value={formatINR(inv.sgst)} />
               <Field
-                label="Grand total"
+                label="Grand total (billed)"
                 value={<span className="text-base font-bold">{formatINR(inv.grand_total)}</span>}
               />
+              {isMMT && (
+                <Field
+                  label="Net receivable from MMT"
+                  value={
+                    netReceivable !== null ? (
+                      <span className="text-base font-bold text-blue-700">{formatINR(netReceivable)}</span>
+                    ) : (
+                      <span className="text-muted-foreground text-xs">Loading…</span>
+                    )
+                  }
+                />
+              )}
+              {isMMT && netReceivable !== null && (
+                <Field
+                  label="MMT deductions"
+                  value={
+                    <span className="text-sm text-red-700">
+                      {formatINR(Number(inv.grand_total) - netReceivable)}
+                    </span>
+                  }
+                />
+              )}
             </div>
           </div>
 
@@ -129,7 +190,7 @@ export function InvoiceDetailClient({
             <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
               <Field label="Amount linked so far" value={<span className="font-semibold text-green-700">{formatINR(linkedTotal)}</span>} />
               <Field
-                label="Outstanding balance"
+                label={isMMT ? "Outstanding (vs net receivable)" : "Outstanding balance"}
                 value={
                   <span className={outstanding > 0.01 ? "font-semibold text-red-700" : "font-semibold text-green-700"}>
                     {formatINR(Math.max(outstanding, 0))}
@@ -142,19 +203,34 @@ export function InvoiceDetailClient({
         </CardContent>
       </Card>
 
-      <LinkedPayments
-        invoiceId={inv.id}
-        links={linksQ.data || []}
-        isLoading={linksQ.isLoading}
-        onChanged={() => {
-          qc.invalidateQueries({ queryKey: ["links", inv.id] });
-          qc.invalidateQueries({ queryKey: ["invoice", inv.id] });
-        }}
-      />
+      {/* Linked payments: shown BEFORE payment panels for reconciled/partial, AFTER for unreconciled */}
+      {inv.reconciliation_status !== "unreconciled" && (
+        <LinkedPayments
+          invoiceId={inv.id}
+          links={linksQ.data || []}
+          isLoading={linksQ.isLoading}
+          onChanged={() => {
+            qc.invalidateQueries({ queryKey: ["links", inv.id] });
+            qc.invalidateQueries({ queryKey: ["invoice", inv.id] });
+          }}
+        />
+      )}
+
+      {isMmtSource(inv.source) && (
+        <MmtReconcilePanel
+          invoice={inv}
+          onReconciled={() => {
+            qc.invalidateQueries({ queryKey: ["links", inv.id] });
+            qc.invalidateQueries({ queryKey: ["invoice", inv.id] });
+            qc.invalidateQueries({ queryKey: ["audit.invoice", inv.id] });
+          }}
+        />
+      )}
 
       <AddPaymentPanel
         invoice={inv}
         outstanding={outstanding}
+        initialOpen={!isMmtSource(inv.source)}
         onSaved={() => {
           qc.invalidateQueries({ queryKey: ["links", inv.id] });
           qc.invalidateQueries({ queryKey: ["invoice", inv.id] });
@@ -162,7 +238,19 @@ export function InvoiceDetailClient({
         }}
       />
 
-      <InvoiceAudit invoiceId={inv.id} />
+      {inv.reconciliation_status === "unreconciled" && (
+        <LinkedPayments
+          invoiceId={inv.id}
+          links={linksQ.data || []}
+          isLoading={linksQ.isLoading}
+          onChanged={() => {
+            qc.invalidateQueries({ queryKey: ["links", inv.id] });
+            qc.invalidateQueries({ queryKey: ["invoice", inv.id] });
+          }}
+        />
+      )}
+
+      <InvoiceAudit invoiceId={inv.id} invoiceNumber={inv.invoice_number} />
     </div>
   );
 }
@@ -298,13 +386,17 @@ function LinkedPayments({
 // ---------------- Add Payment Panel ----------------
 
 function AddPaymentPanel({
-  invoice, outstanding, onSaved,
-}: { invoice: HotelInvoice; outstanding: number; onSaved: () => void }) {
+  invoice, outstanding, onSaved, initialOpen = true,
+}: { invoice: HotelInvoice; outstanding: number; onSaved: () => void; initialOpen?: boolean }) {
   const supabase = React.useMemo(() => createClient(), []);
   const toast = useToast();
+  const router = useRouter();
+  const [panelOpen, setPanelOpen] = React.useState(initialOpen);
   const [method, setMethod] = React.useState<PaymentMethod>("upi");
-  const [date, setDate] = React.useState(new Date().toISOString().slice(0, 10));
-  const [debouncedDate, setDebouncedDate] = React.useState(date);
+  const [date, setDate] = React.useState("");
+  const [debouncedDate, setDebouncedDate] = React.useState("");
+  // Once the user picks a date, never auto-override it on method changes
+  const userHasEditedDate = React.useRef(false);
   const [cashAmount, setCashAmount] = React.useState("");
   const [pending, setPending] = React.useState<NewLinkInput[]>([]);
   const [pickTxn, setPickTxn] = React.useState<TransactionRow | null>(null);
@@ -350,10 +442,9 @@ function AddPaymentPanel({
     },
   });
 
-  // When the latest-date query resolves (or the method changes and it re-resolves),
-  // update the date picker so the transactions list is pre-populated.
+  // Only auto-update the date when it first loads — never override a date the user picked.
   React.useEffect(() => {
-    if (latestDateQ.data) {
+    if (latestDateQ.data && !userHasEditedDate.current) {
       setDate(latestDateQ.data);
       setDebouncedDate(latestDateQ.data);
     }
@@ -503,6 +594,9 @@ function AddPaymentPanel({
     toast.show("success", `Reconciliation saved. Invoice status: ${statusLabel[newStatus] ?? newStatus ?? "updated"}.`);
     setPending([]);
     onSaved();
+    if (newStatus === "fully_reconciled") {
+      router.push("/invoices");
+    }
   }
 
   const sessionTotal = pending.reduce((s, l) => s + l.amount_applied, 0);
@@ -511,15 +605,30 @@ function AddPaymentPanel({
 
   return (
     <Card id="add-payment">
-      <CardHeader>
-        <CardTitle>{isFullyReconciled ? "Add another payment (already fully reconciled)" : "Add payment / Reconcile"}</CardTitle>
-        <p className="mt-1 text-sm text-muted-foreground">
-          {isFullyReconciled
-            ? "This invoice is fully reconciled. You can still link extra payments if needed."
-            : `Outstanding: ${formatINR(outstanding)}. Pick a payment method and date, then click a transaction (or add cash) to apply it to this invoice. Click "Save reconciliation" to finalize.`}
-        </p>
-      </CardHeader>
-      <CardContent className="space-y-4">
+      <button
+        type="button"
+        onClick={() => setPanelOpen((v) => !v)}
+        className="w-full text-left"
+      >
+        <CardHeader className="flex flex-row items-start justify-between gap-3">
+          <div className="flex-1">
+            <CardTitle>{isFullyReconciled ? "Add another payment (already fully reconciled)" : "Add payment / Reconcile"}</CardTitle>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {isFullyReconciled
+                ? "This invoice is fully reconciled. You can still link extra payments if needed."
+                : `Outstanding: ${formatINR(outstanding)}. Pick a payment method and date, then click a transaction (or add cash) to apply it to this invoice.`}
+            </p>
+          </div>
+          <div className="mt-1 text-muted-foreground" aria-hidden>
+            {panelOpen ? (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="18 15 12 9 6 15" /></svg>
+            ) : (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9" /></svg>
+            )}
+          </div>
+        </CardHeader>
+      </button>
+      {panelOpen && <CardContent className="space-y-4">
         {errorBanner && (
           <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900">{errorBanner}</div>
         )}
@@ -531,8 +640,17 @@ function AddPaymentPanel({
             </Select>
           </div>
           <div>
-            <Label>Date</Label>
-            <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+            <Label>
+              {method === "upi" || method === "card" ? "Settlement date" : "Date"}
+            </Label>
+            <Input
+              type="date"
+              value={date}
+              onChange={(e) => {
+                userHasEditedDate.current = true;
+                setDate(e.target.value);
+              }}
+            />
             {method !== "cash" && (
               <p className="mt-1 text-xs text-muted-foreground">
                 {latestDateQ.isLoading
@@ -648,7 +766,7 @@ function AddPaymentPanel({
             </Button>
           </div>
         </div>
-      </CardContent>
+      </CardContent>}
 
       {/* Pick amount modal */}
       <Dialog
@@ -717,7 +835,7 @@ function prettifyError(msg: string): string {
   return "Save failed — nothing was changed. Please try again or contact support.";
 }
 
-function InvoiceAudit({ invoiceId }: { invoiceId: string }) {
+function InvoiceAudit({ invoiceId, invoiceNumber }: { invoiceId: string; invoiceNumber: string | null }) {
   const [open, setOpen] = React.useState(false);
   const supabase = React.useMemo(() => createClient(), []);
   const q = useQuery({
@@ -736,7 +854,9 @@ function InvoiceAudit({ invoiceId }: { invoiceId: string }) {
     <Card>
       <button onClick={() => setOpen((v) => !v)} className="w-full text-left">
         <div className="flex items-center justify-between border-b px-4 py-3">
-          <div className="text-base font-semibold">Audit trail (this invoice)</div>
+          <div className="text-base font-semibold">
+            Audit trail{invoiceNumber ? ` — ${invoiceNumber}` : ""}
+          </div>
           <div className="text-sm text-muted-foreground">{open ? "Hide" : "Show"}</div>
         </div>
       </button>
@@ -749,6 +869,7 @@ function InvoiceAudit({ invoiceId }: { invoiceId: string }) {
                 <THead>
                   <TR>
                     <TH>When</TH>
+                    <TH>Invoice</TH>
                     <TH>Action</TH>
                     <TH>Actor</TH>
                     <TH>Entity</TH>
@@ -758,6 +879,7 @@ function InvoiceAudit({ invoiceId }: { invoiceId: string }) {
                   {(q.data || []).map((r) => (
                     <TR key={r.id}>
                       <TD>{formatDateTime(r.occurred_at)}</TD>
+                      <TD className="text-xs font-medium">{invoiceNumber || "—"}</TD>
                       <TD className="font-mono text-xs">{r.action}</TD>
                       <TD className="text-xs">{r.actor_user_id?.slice(0, 8) || "—"}</TD>
                       <TD className="text-xs">{r.entity_type}/{r.entity_id?.slice(0, 8)}</TD>

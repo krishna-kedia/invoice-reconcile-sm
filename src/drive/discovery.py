@@ -144,7 +144,8 @@ class FileDiscovery:
             'image/heic': 'heic',
             'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
             'application/vnd.ms-excel': 'xls',
-            'text/csv': 'csv'
+            'text/csv': 'csv',
+            'application/json': 'json',
         }
-        
+
         return mime_to_ext.get(mime_type, 'unknown')

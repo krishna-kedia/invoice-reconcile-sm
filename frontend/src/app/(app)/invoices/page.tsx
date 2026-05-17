@@ -17,7 +17,6 @@ import { formatINR, formatDate } from "@/lib/utils";
 const PAGE_SIZE = 50;
 
 export default function InvoicesPage() {
-  const [tab, setTab] = React.useState<"walkin" | "ota">("walkin");
   const [status, setStatus] = React.useState<string>("all");
   const [dateFrom, setDateFrom] = React.useState("");
   const [dateTo, setDateTo] = React.useState("");
@@ -29,38 +28,17 @@ export default function InvoicesPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Invoices</h1>
-        <div className="flex rounded-md border bg-card text-sm">
-          <button
-            onClick={() => setTab("walkin")}
-            className={`px-3 py-1.5 ${tab === "walkin" ? "bg-primary text-primary-foreground rounded-md" : "text-muted-foreground"}`}
-          >
-            Walk-in
-          </button>
-          <button
-            onClick={() => setTab("ota")}
-            className={`px-3 py-1.5 ${tab === "ota" ? "bg-primary text-primary-foreground rounded-md" : "text-muted-foreground"}`}
-          >
-            OTA (read-only)
-          </button>
-        </div>
-      </div>
-
-      {tab === "walkin" ? (
-        <WalkInList
-          status={status} setStatus={setStatus}
-          dateFrom={dateFrom} setDateFrom={setDateFrom}
-          dateTo={dateTo} setDateTo={setDateTo}
-          guest={guest} setGuest={setGuest}
-          invoiceNumber={invoiceNumber} setInvoiceNumber={setInvoiceNumber}
-          amountMin={amountMin} setAmountMin={setAmountMin}
-          amountMax={amountMax} setAmountMax={setAmountMax}
-          page={page} setPage={setPage}
-        />
-      ) : (
-        <OtaList />
-      )}
+      <h1 className="text-xl font-semibold">Invoices</h1>
+      <WalkInList
+        status={status} setStatus={setStatus}
+        dateFrom={dateFrom} setDateFrom={setDateFrom}
+        dateTo={dateTo} setDateTo={setDateTo}
+        guest={guest} setGuest={setGuest}
+        invoiceNumber={invoiceNumber} setInvoiceNumber={setInvoiceNumber}
+        amountMin={amountMin} setAmountMin={setAmountMin}
+        amountMax={amountMax} setAmountMax={setAmountMax}
+        page={page} setPage={setPage}
+      />
     </div>
   );
 }
@@ -220,53 +198,3 @@ function WalkInList(props: any) {
   );
 }
 
-function OtaList() {
-  const supabase = React.useMemo(() => createClient(), []);
-  const query = useQuery({
-    queryKey: ["invoices.ota"],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from("mmt_invoice")
-        .select("id, invoice_number, guest_name, arrival_time, departure_time, grand_total")
-        .order("created_at", { ascending: false })
-        .limit(200);
-      if (error) throw error;
-      return data || [];
-    },
-  });
-  return (
-    <Card>
-      <CardHeader><CardTitle>OTA Invoices (read-only)</CardTitle></CardHeader>
-      <CardContent className="p-0">
-        {query.isLoading ? (
-          <div className="p-6 text-sm text-muted-foreground">Loading…</div>
-        ) : query.data!.length === 0 ? (
-          <div className="p-6 text-sm text-muted-foreground">No OTA invoices.</div>
-        ) : (
-          <Table>
-            <THead>
-              <TR>
-                <TH>Invoice #</TH>
-                <TH>Guest</TH>
-                <TH>Arrival</TH>
-                <TH>Departure</TH>
-                <TH className="text-right">Grand total</TH>
-              </TR>
-            </THead>
-            <TBody>
-              {query.data!.map((r: any) => (
-                <TR key={r.id}>
-                  <TD>{r.invoice_number || r.id.slice(0, 8)}</TD>
-                  <TD>{r.guest_name || "—"}</TD>
-                  <TD>{formatDate(r.arrival_time)}</TD>
-                  <TD>{formatDate(r.departure_time)}</TD>
-                  <TD className="text-right tabular-nums">{formatINR(r.grand_total)}</TD>
-                </TR>
-              ))}
-            </TBody>
-          </Table>
-        )}
-      </CardContent>
-    </Card>
-  );
-}

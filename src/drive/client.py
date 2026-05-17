@@ -70,17 +70,25 @@ class DriveClient:
                     'xls': 'application/vnd.ms-excel',
                     'csv': 'text/csv'
                 }
-                
-                if file_type_lower in mime_map:
+
+                # JSON: Drive uploads frequently arrive with MIME 'application/json'
+                # but can also be 'text/plain' or even 'application/octet-stream'.
+                # Always include the name-extension filter so we catch them all.
+                if file_type_lower == 'json':
+                    mime_type_filters.append("mimeType='application/json'")
+                    extension_filters.append("name contains '.json'")
+                elif file_type_lower in mime_map:
                     mime_type_filters.append(f"mimeType='{mime_map[file_type_lower]}'")
                 else:
                     # Fallback to name contains extension
                     extension_filters.append(f"name contains '.{file_type_lower}'")
             
-            if mime_type_filters:
-                query += f" and ({' or '.join(mime_type_filters)})"
-            elif extension_filters:
-                query += f" and ({' or '.join(extension_filters)})"
+            # Combine MIME and extension filters with a single OR — extension
+            # fallbacks must still apply for types whose MIME we can't predict
+            # (e.g. JSON uploads sometimes arrive as text/plain or octet-stream).
+            combined_filters = mime_type_filters + extension_filters
+            if combined_filters:
+                query += f" and ({' or '.join(combined_filters)})"
         
         files = []
         page_token = None

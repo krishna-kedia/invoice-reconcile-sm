@@ -11,6 +11,7 @@ from .models import (
 )
 from .table_manager import sanitize_table_name, get_column_name
 from .excel_inserter import ExcelDirectInserter
+from .mmt_payout_inserter import MmtPayoutInserter
 
 
 class DatabaseClient:
@@ -358,3 +359,23 @@ class DatabaseClient:
             document_type=document_type,
             fields_config=fields_config
         )
+
+    def insert_mmt_payout_json(
+        self,
+        file_id: str,
+        parsed_json: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Insert one parsed MMT-payout JSON file.
+
+        Routes to MmtPayoutInserter; idempotent via ON CONFLICT DO NOTHING semantics.
+
+        Args:
+            file_id: File UUID.
+            parsed_json: The JSON object as parsed by JsonProcessor.
+
+        Returns:
+            Dict from MmtPayoutInserter.insert_payout_json describing what was
+            inserted/skipped.
+        """
+        inserter = MmtPayoutInserter(self)
+        return inserter.insert_payout_json(file_id=file_id, parsed_json=parsed_json)

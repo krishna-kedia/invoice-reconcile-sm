@@ -134,12 +134,14 @@ class InvoiceReconcileSystem:
             if not processor:
                 raise ValueError(f"No processor available for file type: {file_type}")
 
-            # Get document type config for password (if PDF)
+            # Get document type config for password / vision flags (if PDF)
             pdf_password = None
+            force_vision = False
             if file_type.lower() == 'pdf':
-                doc_type_config = self.config.get_document_type(document_type)
-                if doc_type_config:
-                    pdf_password = doc_type_config.get('pdf_password')
+                doc_type_config_early = self.config.get_document_type(document_type)
+                if doc_type_config_early:
+                    pdf_password = doc_type_config_early.get('pdf_password')
+                    force_vision = bool(doc_type_config_early.get('use_vision', False))
 
             # Process file (OCR or direct parse)
             logger.info(f"Processing file with {processor.__class__.__name__}")
@@ -150,9 +152,13 @@ class InvoiceReconcileSystem:
                 details={'processor': processor.__class__.__name__}
             )
 
-            # Only OCRProcessor supports password parameter
-            if file_type.lower() == 'pdf' and pdf_password:
-                process_result = processor.process(file_content, file_type, password=pdf_password)
+            # Only OCRProcessor supports password / force_vision parameters
+            if file_type.lower() == 'pdf':
+                process_result = processor.process(
+                    file_content, file_type,
+                    password=pdf_password,
+                    force_vision=force_vision,
+                )
             else:
                 process_result = processor.process(file_content, file_type)
             raw_text = process_result['raw_text']
@@ -174,8 +180,55 @@ class InvoiceReconcileSystem:
 
             # Check if Excel file with direct insertion enabled
             excel_direct_insert = doc_type_config.get('excel_direct_insert', False)
+            # Check if JSON file with direct insertion enabled
+            json_direct_insert = doc_type_config.get('json_direct_insert', False)
 
-            if file_type.lower() in ['xlsx', 'xls', 'csv'] and excel_direct_insert:
+            if file_type.lower() == 'json' and json_direct_insert:
+                # Direct JSON insertion path (skip LLM)
+                logger.info(f"Processing JSON file with direct insertion for {file_name}")
+
+                parsed_json = process_result.get('parsed_json')
+                if parsed_json is None:
+                    raise ValueError("JSON processor did not return parsed_json")
+
+                # Refresh the ocr_outputs row metadata with the json-direct flag so
+                # the audit trail makes the path obvious.
+                # (ocr_outputs row was already inserted above; we annotate via log only.)
+
+                result = db.insert_mmt_payout_json(
+                    file_id=file_id,
+                    parsed_json=parsed_json
+                )
+
+                db.insert_log(
+                    operation=OperationType.EXTRACTION,
+                    status=LogStatus.SUCCESS if result.get('success') else LogStatus.FAILURE,
+                    file_id=file_id,
+                    details={
+                        'document_type': document_type,
+                        'processing_method': 'json_direct_insert',
+                        'payout_inserted': result.get('payout_inserted'),
+                        'payout_existed': result.get('payout_existed'),
+                        'bookings_inserted': result.get('bookings_inserted', 0),
+                        'bookings_skipped': result.get('bookings_skipped', 0),
+                        'transaction_no': result.get('transaction_no'),
+                        'errors': result.get('errors', []),
+                    }
+                )
+
+                if result.get('success'):
+                    db.update_file_status(file_id, FileStatus.COMPLETED)
+                    logger.info(
+                        f"Successfully processed JSON file: {file_name} "
+                        f"(payout {'inserted' if result.get('payout_inserted') else 'existed'}, "
+                        f"{result.get('bookings_inserted', 0)} bookings inserted, "
+                        f"{result.get('bookings_skipped', 0)} skipped)"
+                    )
+                else:
+                    err = result.get('errors') or [{'error': 'Unknown JSON insert error'}]
+                    raise ValueError(f"Failed to insert MMT payout JSON: {err[0].get('error')}")
+
+            elif file_type.lower() in ['xlsx', 'xls', 'csv'] and excel_direct_insert:
                 # Direct Excel insertion path (skip LLM)
                 logger.info(f"Processing Excel file with direct insertion for {file_name}")
 

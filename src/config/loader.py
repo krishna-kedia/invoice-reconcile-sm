@@ -100,20 +100,31 @@ class Config:
             
             # If excel_direct_insert is True, extraction_prompt is optional
             excel_direct_insert = doc_type.get('excel_direct_insert', False)
+            json_direct_insert = doc_type.get('json_direct_insert', False)
             if excel_direct_insert:
                 # For direct Excel insertion, extraction_prompt is optional
                 required_fields = ['document_type', 'drive_folder_id', 'file_types', 'fields']
-            
+            if json_direct_insert:
+                # For direct JSON insertion the schema is owned by a hand-written
+                # inserter — `extraction_prompt` and `fields` are both optional.
+                required_fields = ['document_type', 'drive_folder_id', 'file_types']
+
             for field in required_fields:
                 if field not in doc_type:
                     raise ValueError(f"Document type '{doc_type.get('document_type', 'unknown')}' "
                                    f"missing required field: {field}")
-            
+
             # Validate excel_direct_insert flag if present
             if 'excel_direct_insert' in doc_type:
                 if not isinstance(doc_type['excel_direct_insert'], bool):
                     raise ValueError(f"Document type '{doc_type.get('document_type', 'unknown')}' "
                                    f"excel_direct_insert must be a boolean")
+
+            # Validate json_direct_insert flag if present
+            if 'json_direct_insert' in doc_type:
+                if not isinstance(doc_type['json_direct_insert'], bool):
+                    raise ValueError(f"Document type '{doc_type.get('document_type', 'unknown')}' "
+                                   f"json_direct_insert must be a boolean")
     
     @property
     def system(self) -> Dict[str, Any]:
