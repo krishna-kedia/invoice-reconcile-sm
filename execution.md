@@ -1,9 +1,9 @@
-<!-- Last updated: 2026-05-17 21:30 -->
+<!-- Last updated: 2026-05-18 10:00 -->
 
 # Execution Plan
 ## Hotel Invoice Reconciliation App — V1 (Walk-in Invoices)
 
-### Status: V1 BUILD COMPLETE — MMT payout JSON ingestion DONE — MMT Direct Reconcile IN PROGRESS
+### Status: V1 BUILD COMPLETE — MMT payout ingestion DONE — MMT Direct Reconcile DONE — Bank Statement View IN PROGRESS
 
 This document tracks the V1 build. All Phase A (foundations), Phase B (RPC core), and Phase D + E (frontend) work is in place. Phase C (RPC test suite) and Phase F (E2E QA) remain as the next layer.
 
@@ -178,6 +178,21 @@ The most recent slice — **Phase M (MMT Direct Reconcile)** — adds a new reco
 
 ## In Progress
 
+### Phase BS — Bank Statement View (FR-067..FR-074)
+
+- BS-1 RPCs: DONE — migration `bank_statement_view_rpcs` applied. Both `rpc_get_bank_statement_view` and `rpc_get_bank_statement_drilldown` deployed, smoke-tested as operator. Card-settlement drill on `28e7940c-…` (₹82402.16) returned 5 transactions with `net_after_mdr` computed correctly (e.g., ₹4095 × 0.985 = ₹4033.58). MMT drill on `d32e08ce-…` returned 2 bookings linked by `transaction_no` substring match.
+- BS-2 frontend: DONE — `bank-statement/page.tsx` + `bank-statement-client.tsx` + `DrillDown` component; nav entry added for both roles; `xlsx@0.18.5` installed; `BankStatementRow` / drill types added to `lib/types.ts`. `npm run build` clean (14 routes, `/bank-statement` 6.62 kB), `tsc --noEmit` clean.
+- BS-3 QA: PENDING — needs manual click-through as both operator and admin.
+
+Sequence: BS-1 (RPCs) → BS-2 (frontend page + nav) → BS-3 (QA).
+
+DB join paths verified live (2026-05-18):
+- `upi_transactions.card_settlement_id` → `card_settlement.id` (NOT NULL, FK present).
+- `card_transactions.card_settlement_id` → `card_settlement.id` (NOT NULL, FK present).
+- `card_settlement.card` and `.upi` are NULL for all 44 existing rows — settlement type is classified via `bank_statement.narration` substring instead.
+- Bank↔settlement amount match: `bank_statement.deposit_amt = card_settlement.net_amount` AND `card_settlement.mpr_date BETWEEN bank_statement.date - 3 days AND bank_statement.date` (observed 0–2 day gap; 3-day window for safety).
+- `bank_statement` has 110 deposit rows and 51 withdrawal rows (2026-04-01 to 2026-05-16).
+
 ### Phase M — MMT Direct Reconcile (FR-059..FR-066)
 - M1 schema migration: DONE — `mmt_direct_reconcile_schema`.
 - M2 RPCs: DONE — `mmt_direct_reconcile_rpcs` + `mmt_direct_reconcile_rpcs_role_guard_fix` (NULL-safe role guards).
@@ -187,6 +202,39 @@ The most recent slice — **Phase M (MMT Direct Reconcile)** — adds a new reco
 ---
 
 ## Up Next (sequenced)
+
+### BS-1 — RPCs for Bank Statement View
+- Agent: database-manager (executed by PM)
+- Priority: High
+- Depends on: existing schema only (no new tables)
+- Migration name: `bank_statement_view_rpcs`
+- Instructions:
+  1. Create `rpc_get_bank_statement_view(p_date_from date, p_date_to date, p_narration text, p_chq_ref text, p_methods text[], p_invoice_number text, p_amount_min numeric, p_amount_max numeric, p_drill_types text[], p_page int, p_page_size int) RETURNS jsonb` per FR-067..FR-072.
+  2. Create `rpc_get_bank_statement_drilldown(p_bank_statement_id uuid, p_drill_type text) RETURNS jsonb` per FR-070.
+  3. Both SECURITY DEFINER, role-checked via `current_user_role()`, GRANT EXECUTE to authenticated, no audit writes (read-only).
+- Done when: both RPCs deployed, smoke-tested via SQL on the 2026-05-16 UPI settlement row (`d4bb2dbd-…`, ₹26817.82) and the 2026-05-16 cards settlement row (`28e7940c-…`, ₹82402.16).
+
+### BS-2 — Frontend: /bank-statement page + nav entry
+- Agent: frontend-dev (executed by PM)
+- Priority: High
+- Depends on: BS-1
+- Files to add:
+  - `frontend/src/app/(app)/bank-statement/page.tsx` (server wrapper)
+  - `frontend/src/app/(app)/bank-statement/bank-statement-client.tsx` (client component)
+- Files to modify:
+  - `frontend/src/app/(app)/layout.tsx` — add Bank Statement nav entry between Invoices and Audit Log for both roles.
+  - `frontend/src/lib/types.ts` — add `BankStatementRow`, `BankStatementDrillUpi`, `BankStatementDrillCard`, `BankStatementDrillMmt` types.
+  - `frontend/package.json` — add `xlsx` dep.
+- Implements FR-067..FR-074: filters, row-splitting visuals, inline accordion drill-down (lazy), Excel export of filtered set capped at 10k.
+- Done when: `npm run build` clean, `tsc --noEmit` clean, an UPI / Card / MMT row each expand to show real sub-rows, Excel download succeeds.
+
+### BS-3 — QA: end-to-end smoke + error-state coverage
+- Agent: qa
+- Priority: High
+- Depends on: BS-2
+- Done when: state matrix below ticked green.
+
+---
 
 ### M1 — Schema migration: reconciled_at + reconciled_link_id columns, payment_method enum extension, source_config seed, un-reconcile trigger
 - Agent: database-manager (executed by PM)

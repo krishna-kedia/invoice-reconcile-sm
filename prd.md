@@ -1,4 +1,4 @@
-<!-- Last updated: 2026-05-17 21:30 -->
+<!-- Last updated: 2026-05-18 10:00 -->
 
 # Product Requirements Document
 ## Hotel Invoice Reconciliation App — V1 (Walk-in Invoices)
@@ -735,10 +735,106 @@ Note on un-reconciliation: when `rpc_admin_reverse_reconciliation` (or approved 
 
 ---
 
+## Addendum — Bank Statement View (2026-05-18)
+
+This addendum adds a **read-only, transactions-first ledger view** of the uploaded HDFC bank statement, with reconciled-invoice attribution, inline drill-downs into the card/UPI/MMT sub-transactions that constitute each bank credit, filters, and Excel export. It does NOT change the reconciliation workflow itself — mutations still happen on the invoice detail page.
+
+### Goal
+The operator/admin opens one place to see what the bank has actually credited (or debited) and what invoice(s) those credits have been reconciled against. The bank statement is the canonical base; everything else — card settlements, UPI settlements, MMT payouts — is shown as nested context against the bank line.
+
+### FR-067 — Route, role access, layout
+- New route: `/bank-statement`, rendered inside the existing `(app)` layout.
+- Visible to BOTH `operator` and `admin` roles.
+- Added as a new top-level item in the left nav between "Invoices" and "Audit Log", label "Bank Statement".
+- Page is **read-only** in V1. No mutations on this page. Drill-down rows and links to invoice detail pages are clickable.
+
+### FR-068 — Row scope and base query
+- The base dataset is `bank_statement` rows where `deposit_amt > 0` (credits only). Withdrawals are NOT shown in V1.
+- One screen row per `(bank_statement, reconciliation_link)` pair when the bank row has one or more `reconciliation_links` rows (i.e., **row-splitting** by invoice). A bank row with N linked invoices renders as N rows.
+- A bank row with zero `reconciliation_links` renders as a single row with the linked-invoice column blank and an amber 2px left border (to signal "unreconciled").
+
+### FR-069 — Columns shown (main table, in this order)
+1. Date (`bank_statement.date`)
+2. Narration (`bank_statement.narration`)
+3. Cheque / Ref no (`bank_statement.chq_ref_no`)
+4. Deposit amount (`bank_statement.deposit_amt`, formatted ₹)
+5. Amount applied to invoice (`reconciliation_links.amount_applied` — only on split rows; blank on unreconciled)
+6. Linked invoice (`hotel_invoice.invoice_number` clickable to `/invoices/{id}`; for `payment_method='mmt_payout'`, ALSO show the `mmt_bookings_payout.booking_id`; blank on unreconciled rows)
+7. Method (`reconciliation_links.payment_method` — capitalised pill: `upi`, `card`, `bank_transfer`, `cash`, `mmt_payout`)
+8. Closing balance (`bank_statement.closing_balance`)
+9. Drill-down toggle (a `▸ / ▾` chevron on rows that have constituent transactions — see FR-070)
+
+For "split" rows (row index ≥ 2 within the same bank row), columns 1–4, 8 are visually de-emphasised (`text-muted-foreground`) with a small `↳ split` tag in the Date cell; the drill-down chevron renders only on row index 1.
+
+### FR-070 — Inline accordion drill-down classifier
+A bank-statement row gets a chevron and is expandable if it falls into one of these classes (matched server-side):
+- **UPI settlement**: `narration ILIKE '%UPI SETTLEMENT%'`. Drill-down lists all `upi_transactions` rows joined via `upi_transactions.card_settlement_id = card_settlement.id` where `card_settlement.net_amount = bank_statement.deposit_amt` AND `card_settlement.mpr_date BETWEEN bank_statement.date - INTERVAL '3 days' AND bank_statement.date`. Columns: `transaction_date`, `settlement_date`, `vpa`, `upi_transaction_id`, `amount`.
+- **Card settlement**: `narration ILIKE '%CARDS SETTL%'`. Drill-down lists all `card_transactions` rows from the matching `card_settlement` (same join: `card_transactions.card_settlement_id = card_settlement.id` and matching by `net_amount = deposit_amt` AND `mpr_date BETWEEN date - 3 days AND date`). Columns: `transaction_date`, `settlement_date`, `gross_amount`, `mdr_percent`, **`net_after_mdr = gross_amount × (1 − mdr_percent/100)`** (computed in SQL).
+- **MMT payout**: `chq_ref_no` non-empty AND there exists a `mmt_bookings_payout` row where `mmt_bookings_payout.transaction_no` is contained in `bank_statement.chq_ref_no` (case-insensitive substring, matches FR-062 logic). Drill-down lists all matching `mmt_bookings_payout` rows. Columns: `booking_id`, `client_name`, `hotel_name`, `check_in`, `check_out`, `payable`, and a "Hotel invoice" link if a `hotel_invoice` row exists with that `booking_id`.
+- **None of the above**: no chevron, no drill-down (bank transfer / NEFT / cash deposit credits).
+
+Classifier is exposed by the main RPC as a `drill_type ∈ ('upi_settlement','card_settlement','mmt_payout',null)` field per row, plus a count summary. The actual drill-down rows are fetched lazily on chevron click via a second RPC.
+
+### FR-071 — Filters bar (above table)
+- Date from / Date to (defaults: today − 30 days through today).
+- Narration substring (`ILIKE '%term%'`).
+- Cheque / Ref no substring.
+- Method (multi-select: any of `upi / card / bank_transfer / cash / mmt_payout / unreconciled`). "Unreconciled" filters to bank rows with `link_count = 0`.
+- Linked invoice number substring.
+- Min amount / Max amount (applied to `deposit_amt`).
+- Drill-down type (multi-select: `upi_settlement / card_settlement / mmt_payout / none`).
+- "Clear filters" button resets to defaults (last-30 date window only).
+
+### FR-072 — Sort, pagination, performance
+- Default sort: `bank_statement.date DESC, value_dt DESC, bank_statement.id` for stable ties.
+- Server-side pagination: 100 rows per page.
+- The main RPC `rpc_get_bank_statement_view(...)` returns: paginated rows, total count, and per-row `drill_count` summary (a JSON blob `{upi_count, card_count, mmt_count}` so the UI can show "▸ 4 card transactions" without a round-trip).
+- The drill-down RPC `rpc_get_bank_statement_drilldown(p_bank_statement_id uuid, p_drill_type text)` returns the nested rows on demand.
+- Both RPCs are SECURITY DEFINER, role-checked (operator or admin), and **do NOT write audit log** — read-only operations are explicitly out of audit scope per existing pattern.
+
+### FR-073 — Excel export
+- "Export to Excel" button at the top-right of the page.
+- Exports the **currently filtered** result set (across all pages, not just the visible page). Uses the same RPC with `p_page=null, p_page_size=null` to fetch the full unpaginated dataset, capped at 10,000 rows (V1 ceiling — surface a warning if hit).
+- One row per split (so totals tie out). Columns: all 8 main columns from FR-069, PLUS `drill_type`, `upi_count`, `card_count`, `mmt_count`.
+- Filename: `bank-statement_{date_from}_to_{date_to}.xlsx`.
+- Implementation: client-side via `xlsx` (SheetJS), already a viable Next.js dep; the frontend agent installs it during M3.
+
+### FR-074 — Empty / loading / error states
+- **Loading**: skeleton rows on the table; spinner on the export button.
+- **Empty (no rows match filters)**: "No bank-statement deposits match your filters. Try widening the date range or clearing filters."
+- **Empty (no data uploaded)**: "No bank-statement rows have been uploaded yet. Upload an HDFC statement via the OCR pipeline first."
+- **Error**: red banner explaining what failed and "Try refreshing the page."
+- **Drill-down empty**: inside the expanded row, "No matching settlement found in our records — this bank credit may pre-date settlement ingestion or the amount/date doesn't tie out."
+
+### Business rules (this feature)
+- **BR-023** Bank Statement View shows only `deposit_amt > 0` rows. Withdrawals deferred (V1.5).
+- **BR-024** Row-splitting: one screen row per `reconciliation_links` row attached to the bank row. Bank columns repeat with visual de-emphasis on splits.
+- **BR-025** Drill-down classifier uses narration substring (`UPI SETTLEMENT`, `CARDS SETTL`) and MMT chq_ref_no substring match — NOT the `card_settlement.card`/`upi` columns (which are NULL in current data).
+- **BR-026** Bank ↔ card_settlement join: `net_amount = deposit_amt AND mpr_date BETWEEN date - 3 days AND date`. If multiple settlements match, show ALL their constituent transactions in the drill-down (no error — the bank credit IS the union).
+- **BR-027** This page is read-only. Mutations live on `/invoices/{id}`.
+- **BR-028** Excel export uses the currently active filter set, capped at 10,000 rows.
+
+### Out of scope for this addendum (V1.5)
+- Withdrawal rows.
+- Reconciling directly from this page (would require a "select bank row → pick invoice" inline flow; defer).
+- Bank-statement ↔ MPR settlement reconciliation (already explicitly deferred per the V1 PRD § Out of Scope).
+- Saved filter presets.
+- CSV export (Excel only in V1).
+
+---
+
 ## Decisions Log
 
 | Date | Decision | Rationale |
 |---|---|---|
+| 2026-05-18 | Bank Statement View is read-only in V1; no inline reconcile | Keeps scope focused; mutation surface stays at `/invoices/{id}` per V1 architecture. |
+| 2026-05-18 | Deposits only (no withdrawals) | User-specified for V1. Withdrawals don't carry invoice attribution. |
+| 2026-05-18 | Row-split per `reconciliation_links` row, bank cols de-emphasised on splits | User-specified: "if one transaction reconciles with multiple invoices, the row should just be split". |
+| 2026-05-18 | Drill-down is inline accordion, not side panel/modal | User-specified; matches Excel-like density. |
+| 2026-05-18 | Default date range = last 30 days | User-confirmed. |
+| 2026-05-18 | Excel export in V1 | User-confirmed. SheetJS, client-side, full filtered set capped at 10k rows. |
+| 2026-05-18 | Settlement classifier uses narration substring, not `card_settlement.card`/`upi` flags | DB reality check: both flag columns are NULL across all 44 settlement rows. |
+| 2026-05-18 | Bank↔settlement join window = `mpr_date BETWEEN date−3 days AND date` | Real data shows bank credits land 0–2 days after MPR; 3-day window is safe without over-matching. |
 | 2026-05-17 | Frontend: Next.js 14 + TypeScript + Tailwind + shadcn/ui talking directly to Supabase (with RLS), no FastAPI in the hot path | Fastest path; ACID via Postgres RPC; existing Python OCR backend keeps its scope; audit logic centralised at DB layer. |
 | 2026-05-17 | OTA invoices (`mmt_invoice`) read-only, walk-in only reconcilable | V1 scope per user. |
 | 2026-05-17 | Void/cancelled/refunded invoices not modelled in V1 | Deferred; will revisit when business adds the concept formally. |

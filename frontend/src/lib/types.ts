@@ -232,6 +232,69 @@ export interface NewLinkInput {
   };
 }
 
+// ---------- Bank Statement View (Phase BS) ----------
+
+export type BankStatementDrillType = "upi_settlement" | "card_settlement" | "mmt_payout" | null;
+
+export interface BankStatementRow {
+  bank_id: string;
+  date: string;
+  narration: string;
+  chq_ref_no: string | null;
+  deposit_amt: number;
+  closing_balance: number;
+  link_id: string | null;
+  amount_applied: number | null;
+  invoice_id: string | null;
+  invoice_number: string | null;
+  mmt_booking_id: string | null;
+  payment_method: PaymentMethod | null;
+  drill_type: BankStatementDrillType;
+  drill_count: { upi: number; card: number; mmt: number };
+  split_index: number;
+  split_total: number;
+}
+
+export interface BankStatementViewResponse {
+  rows: BankStatementRow[];
+  total_count: number;
+  export_capped: boolean;
+}
+
+export interface BankStatementDrillUpi {
+  id: string;
+  transaction_date: string;
+  settlement_date: string;
+  vpa: string | null;
+  upi_transaction_id: string | null;
+  amount: number;
+  card_settlement_id: string;
+}
+
+export interface BankStatementDrillCard {
+  id: string;
+  transaction_date: string;
+  settlement_date: string;
+  gross_amount: number;
+  mdr_percent: number;
+  net_after_mdr: number;
+  card_settlement_id: string;
+}
+
+export interface BankStatementDrillMmt {
+  id: string;
+  transaction_no: string;
+  booking_id: string;
+  booking_pnr: string | null;
+  client_name: string | null;
+  hotel_name: string | null;
+  check_in: string | null;
+  check_out: string | null;
+  payable: number;
+  hotel_invoice_id: string | null;
+  hotel_invoice_number: string | null;
+}
+
 export interface AdminHomeSummary {
   unreconciled_count: number;
   unreconciled_amount: number;
