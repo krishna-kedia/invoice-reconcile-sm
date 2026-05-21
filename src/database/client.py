@@ -12,6 +12,8 @@ from .models import (
 from .table_manager import sanitize_table_name, get_column_name
 from .excel_inserter import ExcelDirectInserter
 from .mmt_payout_inserter import MmtPayoutInserter
+from .yatra_payout_inserter import YatraPayoutInserter
+from .agoda_payout_inserter import AgodaPayoutInserter
 
 
 class DatabaseClient:
@@ -378,4 +380,41 @@ class DatabaseClient:
             inserted/skipped.
         """
         inserter = MmtPayoutInserter(self)
+        return inserter.insert_payout_json(file_id=file_id, parsed_json=parsed_json)
+
+    def insert_yatra_payout_json(
+        self,
+        file_id: str,
+        parsed_json: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Insert one parsed Yatra-payout JSON file.
+
+        Routes to YatraPayoutInserter. Idempotent: if voucher_no already exists
+        the row is skipped rather than overwritten.
+
+        Args:
+            file_id: File UUID.
+            parsed_json: The JSON object as parsed by JsonProcessor.
+
+        Returns:
+            Dict from YatraPayoutInserter.insert_payout_json with keys:
+              success, inserted, skipped, voucher_no, errors.
+        """
+        inserter = YatraPayoutInserter(self)
+        return inserter.insert_payout_json(file_id=file_id, parsed_json=parsed_json)
+
+    def insert_agoda_payout_json(
+        self,
+        file_id: str,
+        parsed_json: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Insert one parsed Agoda-payout JSON file.
+
+        Routes to AgodaPayoutInserter. Idempotent: if booking_id already exists
+        the row is skipped rather than overwritten.
+
+        Returns:
+            Dict with keys: success, inserted, skipped, booking_id, errors.
+        """
+        inserter = AgodaPayoutInserter(self)
         return inserter.insert_payout_json(file_id=file_id, parsed_json=parsed_json)

@@ -64,6 +64,7 @@ Thumbs.db
 
 # Sensitive credentials
 google_cloud_json_auth.json
+.mcp.json
 *.pem
 *.key
 

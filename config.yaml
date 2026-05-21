@@ -286,3 +286,25 @@ document_types:
     # auto-DDL logic is skipped because the migration created both tables
     # explicitly with FKs, indexes and a composite UNIQUE constraint.
     fields: []
+
+  - document_type: yatra_payout
+    drive_folder_id: "11VRWMBTfYJY10s9kXTKm-wq0Yq6QjnL1"
+    file_types: [json]
+
+    # Direct JSON insertion — one JSON file per Yatra booking voucher.
+    # Parses the Yatra email-derived JSON and inserts into yatra_bookings_payout.
+    # Idempotent: duplicate voucher_no is skipped and flagged in logs.
+    json_direct_insert: true
+
+    fields: []
+
+  - document_type: agoda_payout
+    drive_folder_id: "1BizgT6-4YclLSqUa2cDtJEXFtW75edP4"
+    file_types: [json]
+
+    # Direct JSON insertion — one JSON file per Agoda booking.
+    # Parses the Agoda email-derived JSON and inserts into agoda_bookings_payout.
+    # Idempotent: duplicate booking_id is skipped and flagged in logs.
+    json_direct_insert: true
+
+    fields: []

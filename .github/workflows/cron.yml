@@ -1,0 +1,66 @@
+name: Document Processor
+
+on:
+  schedule:
+    - cron: '30 20 * * *'  # 2:00 AM IST = 8:30 PM UTC
+  workflow_dispatch:         # allow manual trigger from GitHub UI
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get install -y poppler-utils
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write service account JSON
+        run: echo "${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}" | base64 -d > google_cloud_json_auth.json
+
+      - name: Run processor
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: google_cloud_json_auth.json
+          HOTEL_INVOICES: ${{ secrets.HOTEL_INVOICES }}
+          MMT_INVOICES: ${{ secrets.MMT_INVOICES }}
+          HDFC_MPR_HOTEL_ACCOUNT: ${{ secrets.HDFC_MPR_HOTEL_ACCOUNT }}
+          BANK_STATEMENTS: ${{ secrets.BANK_STATEMENTS }}
+          MMT_PAYOUTS: ${{ secrets.MMT_PAYOUTS }}
+          AGODA_PAYOUTS: ${{ secrets.AGODA_PAYOUTS }}
+          YATRA_PAYOUTS: ${{ secrets.YATRA_PAYOUTS }}
+        run: python src/main.py
+
+      - name: Check for processing failures
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python - <<'EOF'
+          import os, sys
+          from supabase import create_client
+          from datetime import datetime, timedelta, timezone
+          sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
+          cutoff = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+          res = sb.table("files").select("file_name,error_message,document_type") \
+                  .eq("status", "failed") \
+                  .gte("updated_at", cutoff) \
+                  .execute()
+          if res.data:
+              print(f"FAILURES: {len(res.data)} file(s) failed in this run:")
+              for f in res.data:
+                  print(f"  [{f['document_type']}] {f['file_name']}: {f['error_message']}")
+              sys.exit(1)
+          print(f"All files processed successfully.")
+          EOF

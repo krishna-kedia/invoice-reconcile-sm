@@ -191,20 +191,52 @@ class InvoiceReconcileSystem:
                 if parsed_json is None:
                     raise ValueError("JSON processor did not return parsed_json")
 
-                # Refresh the ocr_outputs row metadata with the json-direct flag so
-                # the audit trail makes the path obvious.
-                # (ocr_outputs row was already inserted above; we annotate via log only.)
-
-                result = db.insert_mmt_payout_json(
-                    file_id=file_id,
-                    parsed_json=parsed_json
-                )
-
-                db.insert_log(
-                    operation=OperationType.EXTRACTION,
-                    status=LogStatus.SUCCESS if result.get('success') else LogStatus.FAILURE,
-                    file_id=file_id,
-                    details={
+                # Route to the correct inserter based on document_type.
+                if document_type == 'yatra_payout':
+                    result = db.insert_yatra_payout_json(
+                        file_id=file_id,
+                        parsed_json=parsed_json
+                    )
+                    log_details = {
+                        'document_type': document_type,
+                        'processing_method': 'json_direct_insert',
+                        'inserted': result.get('inserted'),
+                        'skipped': result.get('skipped'),
+                        'voucher_no': result.get('voucher_no'),
+                        'errors': result.get('errors', []),
+                    }
+                    success_msg = (
+                        f"Successfully processed Yatra JSON file: {file_name} "
+                        f"(voucher_no={result.get('voucher_no')}, "
+                        f"{'inserted' if result.get('inserted') else 'skipped/already existed'})"
+                    )
+                    failure_prefix = "Failed to insert Yatra payout JSON"
+                elif document_type == 'agoda_payout':
+                    result = db.insert_agoda_payout_json(
+                        file_id=file_id,
+                        parsed_json=parsed_json
+                    )
+                    log_details = {
+                        'document_type': document_type,
+                        'processing_method': 'json_direct_insert',
+                        'inserted': result.get('inserted'),
+                        'skipped': result.get('skipped'),
+                        'booking_id': result.get('booking_id'),
+                        'errors': result.get('errors', []),
+                    }
+                    success_msg = (
+                        f"Successfully processed Agoda JSON file: {file_name} "
+                        f"(booking_id={result.get('booking_id')}, "
+                        f"{'inserted' if result.get('inserted') else 'skipped/already existed'})"
+                    )
+                    failure_prefix = "Failed to insert Agoda payout JSON"
+                else:
+                    # Default to MMT payout inserter (document_type == 'mmt_payout')
+                    result = db.insert_mmt_payout_json(
+                        file_id=file_id,
+                        parsed_json=parsed_json
+                    )
+                    log_details = {
                         'document_type': document_type,
                         'processing_method': 'json_direct_insert',
                         'payout_inserted': result.get('payout_inserted'),
@@ -214,19 +246,27 @@ class InvoiceReconcileSystem:
                         'transaction_no': result.get('transaction_no'),
                         'errors': result.get('errors', []),
                     }
-                )
-
-                if result.get('success'):
-                    db.update_file_status(file_id, FileStatus.COMPLETED)
-                    logger.info(
+                    success_msg = (
                         f"Successfully processed JSON file: {file_name} "
                         f"(payout {'inserted' if result.get('payout_inserted') else 'existed'}, "
                         f"{result.get('bookings_inserted', 0)} bookings inserted, "
                         f"{result.get('bookings_skipped', 0)} skipped)"
                     )
+                    failure_prefix = "Failed to insert MMT payout JSON"
+
+                db.insert_log(
+                    operation=OperationType.EXTRACTION,
+                    status=LogStatus.SUCCESS if result.get('success') else LogStatus.FAILURE,
+                    file_id=file_id,
+                    details=log_details
+                )
+
+                if result.get('success'):
+                    db.update_file_status(file_id, FileStatus.COMPLETED)
+                    logger.info(success_msg)
                 else:
                     err = result.get('errors') or [{'error': 'Unknown JSON insert error'}]
-                    raise ValueError(f"Failed to insert MMT payout JSON: {err[0].get('error')}")
+                    raise ValueError(f"{failure_prefix}: {err[0].get('error')}")
 
             elif file_type.lower() in ['xlsx', 'xls', 'csv'] and excel_direct_insert:
                 # Direct Excel insertion path (skip LLM)

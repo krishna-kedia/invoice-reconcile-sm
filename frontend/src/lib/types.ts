@@ -245,6 +245,7 @@ export interface BankStatementRow {
   closing_balance: number;
   link_id: string | null;
   amount_applied: number | null;
+  total_amount_applied: number | null;
   invoice_id: string | null;
   invoice_number: string | null;
   mmt_booking_id: string | null;
@@ -269,6 +270,8 @@ export interface BankStatementDrillUpi {
   upi_transaction_id: string | null;
   amount: number;
   card_settlement_id: string;
+  invoice_id: string | null;
+  invoice_number: string | null;
 }
 
 export interface BankStatementDrillCard {
@@ -279,6 +282,8 @@ export interface BankStatementDrillCard {
   mdr_percent: number;
   net_after_mdr: number;
   card_settlement_id: string;
+  invoice_id: string | null;
+  invoice_number: string | null;
 }
 
 export interface BankStatementDrillMmt {
@@ -293,6 +298,7 @@ export interface BankStatementDrillMmt {
   payable: number;
   hotel_invoice_id: string | null;
   hotel_invoice_number: string | null;
+  is_reconciled: boolean;
 }
 
 export interface AdminHomeSummary {
@@ -304,4 +310,100 @@ export interface AdminHomeSummary {
   pending_approvals: number;
   flagged_discrepancies: number;
   recent_audit: AuditLogRow[];
+}
+
+// ---------- Yatra Direct Reconcile ----------
+
+export interface YatraBookingPayout {
+  id: string;
+  file_id: string | null;
+  voucher_no: string;
+  guest_name: string | null;
+  guest_email: string | null;
+  guest_phone: string | null;
+  email_date: string | null;
+  is_pre_pay: boolean | null;
+  booking_date: string | null;
+  check_in: string | null;
+  check_out: string | null;
+  number_of_rooms: string | null;
+  adults: string | null;
+  children: string | null;
+  room_name: string | null;
+  room_type: string | null;
+  rate_plan_type: string | null;
+  total_room_charges: number | null;
+  other_charges: number | null;
+  hotel_gross_charges: number | null;
+  yatra_commission: number | null;
+  yatra_commission_with_gst: number | null;
+  gst: number | null;
+  tcs: number | null;
+  tds: number | null;
+  yatra_to_pay_hotel: number | null;
+  reconciled_at: string | null;
+  reconciled_link_id: string | null;
+  created_at: string;
+}
+
+export interface YatraReconcileCandidate {
+  voucher_no: string;
+  guest_name: string | null;
+  check_in: string | null;
+  check_out: string | null;
+  yatra_to_pay_hotel: number | null;
+  is_default: boolean;
+  created_at: string;
+}
+
+export interface YatraReconcileCandidatesResponse {
+  hotel_invoice_guest_name: string | null;
+  default_voucher_no: string | null;
+  match_type: "guest_name" | "none";
+  candidates: YatraReconcileCandidate[];
+}
+
+// ---------- Agoda Direct Reconcile ----------
+
+export interface AgodaBookingPayout {
+  id: string;
+  file_id: string | null;
+  booking_id: string;
+  email_date: string | null;
+  status: string | null;
+  iata: string | null;
+  guest_name: string | null;
+  country_of_residence: string | null;
+  check_in: string | null;
+  check_out: string | null;
+  other_guests: string | null;
+  room_rate: number | null;
+  reference_sell_rate: number | null;
+  extra_bed_rate: number | null;
+  commission: number | null;
+  compensation: number | null;
+  other_programs: number | null;
+  tds_withholding_tax: number | null;
+  net_rate: number | null;
+  booked_and_payable_by: string | null;
+  reconciled_at: string | null;
+  reconciled_link_id: string | null;
+  created_at: string;
+}
+
+export interface AgodaReconcileCandidate {
+  booking_id: string;
+  guest_name: string | null;
+  check_in: string | null;
+  check_out: string | null;
+  net_rate: number | null;
+  is_default: boolean;
+  created_at: string;
+}
+
+export interface AgodaReconcileCandidatesResponse {
+  hotel_invoice_guest_name: string | null;
+  default_booking_id: string | null;
+  match_type: "guest_name" | "none";
+  candidates: AgodaReconcileCandidate[];
 }

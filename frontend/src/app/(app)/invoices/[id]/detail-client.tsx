@@ -20,6 +20,8 @@ import type {
   HotelInvoice, NewLinkInput, PaymentMethod, ReconciliationLink, SourceTable, TransactionRow, AuditLogRow
 } from "@/lib/types";
 import { MmtReconcilePanel } from "./mmt-reconcile-panel";
+import { YatraReconcilePanel } from "./yatra-reconcile-panel";
+import { AgodaReconcilePanel } from "./agoda-reconcile-panel";
 
 const METHODS: { value: PaymentMethod; label: string }[] = [
   { value: "upi", label: "UPI" },
@@ -30,6 +32,12 @@ const METHODS: { value: PaymentMethod; label: string }[] = [
 
 const isMmtSource = (source: string | null | undefined) =>
   source === "MakeMyTrip" || source === "Goibibo";
+
+const isYatraSource = (source: string | null | undefined) =>
+  !!(source && (source.toLowerCase().includes("yatra") || source.toLowerCase().includes("desiya")));
+
+const isAgodaSource = (source: string | null | undefined) =>
+  !!(source && source.toLowerCase().includes("agoda"));
 
 export function InvoiceDetailClient({
   invoice, currentUserId, currentRole,
@@ -64,6 +72,8 @@ export function InvoiceDetailClient({
 
   const inv = invQ.data!;
   const isMMT = isMmtSource(inv.source);
+  const isYatra = isYatraSource(inv.source);
+  const isAgoda = isAgodaSource(inv.source);
 
   // For MMT/Goibibo invoices, fetch the mmt_invoice row to compute net receivable
   const mmtInvQ = useQuery({
@@ -95,9 +105,28 @@ export function InvoiceDetailClient({
     );
   }, [isMMT, mmtInvQ.data]);
 
+  // For Yatra invoices fetch the best-matched voucher to get yatra_to_pay_hotel
+  const yatraCandidatesQ = useQuery({
+    queryKey: ["yatra_candidates_for", inv.id],
+    enabled: isYatra,
+    queryFn: async () => {
+      const { data, error } = await supabase.rpc("rpc_get_yatra_reconcile_candidates", {
+        p_hotel_invoice_id: inv.id,
+      });
+      if (error) throw error;
+      return data as { default_voucher_no: string | null; candidates: Array<{ voucher_no: string; yatra_to_pay_hotel: number | null; is_default: boolean }> };
+    },
+  });
+
+  const yatraNetReceivable: number | null = React.useMemo(() => {
+    if (!isYatra || !yatraCandidatesQ.data) return null;
+    const defaultCandidate = yatraCandidatesQ.data.candidates.find((c) => c.is_default);
+    return defaultCandidate?.yatra_to_pay_hotel ?? null;
+  }, [isYatra, yatraCandidatesQ.data]);
+
   const linkedTotal = (linksQ.data || []).reduce((s, l) => s + Number(l.amount_applied), 0);
-  // For MMT invoices use net receivable as the reconciliation target; fall back to grand_total
-  const reconciliationTarget = netReceivable ?? Number(inv.grand_total);
+  // For MMT use net receivable; for Yatra use yatra_to_pay_hotel; else grand_total
+  const reconciliationTarget = netReceivable ?? yatraNetReceivable ?? Number(inv.grand_total);
   const outstanding = reconciliationTarget - linkedTotal;
 
   return (
@@ -181,6 +210,28 @@ export function InvoiceDetailClient({
                   }
                 />
               )}
+              {isYatra && (
+                <Field
+                  label="Net receivable from Yatra"
+                  value={
+                    yatraNetReceivable !== null ? (
+                      <span className="text-base font-bold text-blue-700">{formatINR(yatraNetReceivable)}</span>
+                    ) : (
+                      <span className="text-muted-foreground text-xs">No voucher matched yet</span>
+                    )
+                  }
+                />
+              )}
+              {isYatra && yatraNetReceivable !== null && (
+                <Field
+                  label="Yatra deductions"
+                  value={
+                    <span className="text-sm text-red-700">
+                      {formatINR(Number(inv.grand_total) - yatraNetReceivable)}
+                    </span>
+                  }
+                />
+              )}
             </div>
           </div>
 
@@ -190,7 +241,7 @@ export function InvoiceDetailClient({
             <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
               <Field label="Amount linked so far" value={<span className="font-semibold text-green-700">{formatINR(linkedTotal)}</span>} />
               <Field
-                label={isMMT ? "Outstanding (vs net receivable)" : "Outstanding balance"}
+                label={isMMT ? "Outstanding (vs net receivable)" : isYatra ? "Outstanding (vs Yatra net receivable)" : "Outstanding balance"}
                 value={
                   <span className={outstanding > 0.01 ? "font-semibold text-red-700" : "font-semibold text-green-700"}>
                     {formatINR(Math.max(outstanding, 0))}
@@ -227,10 +278,32 @@ export function InvoiceDetailClient({
         />
       )}
 
+      {isYatraSource(inv.source) && (
+        <YatraReconcilePanel
+          invoiceId={inv.id}
+          onReconciled={() => {
+            qc.invalidateQueries({ queryKey: ["links", inv.id] });
+            qc.invalidateQueries({ queryKey: ["invoice", inv.id] });
+            qc.invalidateQueries({ queryKey: ["audit.invoice", inv.id] });
+          }}
+        />
+      )}
+
+      {isAgodaSource(inv.source) && (
+        <AgodaReconcilePanel
+          invoiceId={inv.id}
+          onReconciled={() => {
+            qc.invalidateQueries({ queryKey: ["links", inv.id] });
+            qc.invalidateQueries({ queryKey: ["invoice", inv.id] });
+            qc.invalidateQueries({ queryKey: ["audit.invoice", inv.id] });
+          }}
+        />
+      )}
+
       <AddPaymentPanel
         invoice={inv}
         outstanding={outstanding}
-        initialOpen={!isMmtSource(inv.source)}
+        initialOpen={!isMmtSource(inv.source) && !isYatraSource(inv.source) && !isAgodaSource(inv.source)}
         onSaved={() => {
           qc.invalidateQueries({ queryKey: ["links", inv.id] });
           qc.invalidateQueries({ queryKey: ["invoice", inv.id] });
