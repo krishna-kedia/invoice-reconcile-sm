@@ -234,7 +234,7 @@ export interface NewLinkInput {
 
 // ---------- Bank Statement View (Phase BS) ----------
 
-export type BankStatementDrillType = "upi_settlement" | "card_settlement" | "mmt_payout" | null;
+export type BankStatementDrillType = "upi_settlement" | "card_settlement" | "mmt_payout" | "yatra_payout" | null;
 
 export interface BankStatementRow {
   bank_id: string;
@@ -251,7 +251,7 @@ export interface BankStatementRow {
   mmt_booking_id: string | null;
   payment_method: PaymentMethod | null;
   drill_type: BankStatementDrillType;
-  drill_count: { upi: number; card: number; mmt: number };
+  drill_count: { upi: number; card: number; mmt: number; yatra: number };
   split_index: number;
   split_total: number;
 }
@@ -260,6 +260,12 @@ export interface BankStatementViewResponse {
   rows: BankStatementRow[];
   total_count: number;
   export_capped: boolean;
+}
+
+export interface BankStatementDrillReconciledInvoice {
+  hotel_invoice_id: string;
+  invoice_number: string;
+  amount_applied: number;
 }
 
 export interface BankStatementDrillUpi {
@@ -272,6 +278,9 @@ export interface BankStatementDrillUpi {
   card_settlement_id: string;
   invoice_id: string | null;
   invoice_number: string | null;
+  reconciled_invoices: BankStatementDrillReconciledInvoice[];
+  applied_total: number | null;
+  base_amount: number;
 }
 
 export interface BankStatementDrillCard {
@@ -284,6 +293,9 @@ export interface BankStatementDrillCard {
   card_settlement_id: string;
   invoice_id: string | null;
   invoice_number: string | null;
+  reconciled_invoices: BankStatementDrillReconciledInvoice[];
+  applied_total: number | null;
+  base_amount: number;
 }
 
 export interface BankStatementDrillMmt {
@@ -299,6 +311,25 @@ export interface BankStatementDrillMmt {
   hotel_invoice_id: string | null;
   hotel_invoice_number: string | null;
   is_reconciled: boolean;
+  reconciled_invoices: BankStatementDrillReconciledInvoice[];
+  applied_total: number | null;
+  base_amount: number;
+}
+
+export interface BankStatementDrillYatra {
+  id: string;
+  voucher_no: string;
+  guest_name: string | null;
+  hotel_name: string | null;
+  check_in: string | null;
+  check_out: string | null;
+  yatra_to_pay_hotel: number;
+  hotel_invoice_id: string | null;
+  hotel_invoice_number: string | null;
+  is_reconciled: boolean;
+  reconciled_invoices: BankStatementDrillReconciledInvoice[];
+  applied_total: number | null;
+  base_amount: number;
 }
 
 export interface AdminHomeSummary {
@@ -346,6 +377,24 @@ export interface YatraBookingPayout {
   created_at: string;
 }
 
+// One row per month in v_yatra_monthly_deductions. Aggregates over
+// reconciled Yatra bookings, bucketed by email_date month.
+export interface YatraMonthlyDeduction {
+  month_start: string; // ISO date, e.g. "2026-04-01"
+  year: number;
+  month: number;
+  bookings_count: number;
+  total_tariff_sum: number;
+  yatra_commission_amt_sum: number;
+  yatra_commission_with_gst_sum: number;
+  tds_amt_sum: number;
+  gst_on_commission_sum: number;
+  tcs_amt_sum: number;
+  yatra_to_pay_hotel_sum: number;
+  other_charges_sum: number;
+  hotel_gross_charges_sum: number;
+}
+
 export interface YatraReconcileCandidate {
   voucher_no: string;
   guest_name: string | null;
@@ -361,6 +410,47 @@ export interface YatraReconcileCandidatesResponse {
   default_voucher_no: string | null;
   match_type: "guest_name" | "none";
   candidates: YatraReconcileCandidate[];
+}
+
+// ---------- Issue Reports (Phase RI) ----------
+
+export type IssueReportStatus =
+  | "open"
+  | "resolved_by_admin"
+  | "resolved_by_reconciliation"
+  | "withdrawn_by_operator";
+
+export interface IssueReport {
+  id: string;
+  invoice_id: string;
+  category: string;
+  notes: string | null;
+  status: IssueReportStatus;
+  reported_by: string;
+  reported_at: string;
+  resolved_by: string | null;
+  resolved_at: string | null;
+  resolution_notes: string | null;
+  source_snapshot: string | null;
+}
+
+export interface IssueCategory {
+  id: string;
+  code: string;
+  label: string;
+  applies_to: string[];
+  is_active: boolean;
+  sort_order: number;
+}
+
+// Source bucket classification (mirrors fn_classify_invoice_source on the backend)
+export function classifyInvoiceSource(source: string | null | undefined): string {
+  if (!source) return "walk_in";
+  const s = source.toLowerCase();
+  if (s.includes("mmt") || s.includes("makemytrip") || s.includes("goibibo")) return "mmt";
+  if (s.includes("yatra")) return "yatra";
+  if (s.includes("agoda")) return "agoda";
+  return "walk_in";
 }
 
 // ---------- Agoda Direct Reconcile ----------
@@ -406,4 +496,16 @@ export interface AgodaReconcileCandidatesResponse {
   default_booking_id: string | null;
   match_type: "guest_name" | "none";
   candidates: AgodaReconcileCandidate[];
+}
+
+// ---------- Payment Folio ----------
+
+export interface PaymentSuggestion {
+  id: string;
+  payment_method: string;
+  payment_type_raw: string;
+  received_date: string | null;
+  payment_amount: number;
+  reference_text: string | null;
+  match_type: "booking_id" | "invoice_number";
 }

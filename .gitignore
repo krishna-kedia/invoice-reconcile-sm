@@ -77,3 +77,4 @@ google_cloud_json_auth.json
 *.tmp
 *.temp
 .cache/
+.mcp.json

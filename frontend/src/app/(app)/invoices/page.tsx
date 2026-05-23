@@ -11,7 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
 import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
-import { StatusBadge } from "@/components/ui/badge";
+import { StatusBadge, Badge } from "@/components/ui/badge";
 import { formatINR, formatDate } from "@/lib/utils";
 
 const PAGE_SIZE = 50;
@@ -53,10 +53,9 @@ function WalkInList(props: any) {
   const query = useQuery({
     queryKey: ["invoices.walkin", status, dateFrom, dateTo, guest, invoiceNumber, amountMin, amountMax, page],
     queryFn: async () => {
-      let q = supabase.from("hotel_invoice")
-        .select("id, invoice_number, guest_name, arrival_time, departure_time, grand_total, reconciliation_status, booking_date, created_at", { count: "exact" })
-        // Earliest first — oldest unreconciled invoices surface at the top
-        .order("arrival_time", { ascending: true })
+      let q = supabase.from("v_invoice_list_with_issue")
+        .select("id, invoice_number, guest_name, arrival_time, departure_time, grand_total, reconciliation_status, booking_date, created_at, has_open_issue", { count: "exact" })
+        .order("departure_time", { ascending: true })
         .range(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE - 1);
       if (status !== "all") q = q.eq("reconciliation_status", status);
       if (dateFrom) q = q.gte("arrival_time", dateFrom);
@@ -161,7 +160,14 @@ function WalkInList(props: any) {
                       <TD>{formatDate(r.arrival_time)}</TD>
                       <TD>{formatDate(r.departure_time)}</TD>
                       <TD className="text-right tabular-nums">{formatINR(r.grand_total)}</TD>
-                      <TD><StatusBadge status={r.reconciliation_status} /></TD>
+                      <TD>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <StatusBadge status={r.reconciliation_status} />
+                          {r.has_open_issue && (
+                            <Badge variant="destructive" className="text-xs">Issue reported</Badge>
+                          )}
+                        </div>
+                      </TD>
                       <TD className="text-right">
                         <Button
                           size="sm"

@@ -5,7 +5,8 @@ import { useQuery } from "@tanstack/react-query";
 import { createClient } from "@/lib/supabase/client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
-import { formatINR, formatDate } from "@/lib/utils";
+import { formatINR } from "@/lib/utils";
+import type { YatraMonthlyDeduction } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -38,6 +39,8 @@ interface PivotRow {
   total: number;
   isSameMonth: boolean;
 }
+
+type MisTab = "summary" | "yatra";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -88,6 +91,14 @@ function buildPivot(detailRows: MisPaymentDetailRow[], invoiceMonth: string): Pi
   return Array.from(map.values()).sort((a, b) =>
     b.payment_month.localeCompare(a.payment_month)
   );
+}
+
+/** Coerce a possibly-numeric Postgres value (number | string | null) to number. */
+function num(v: number | string | null | undefined): number {
+  if (v === null || v === undefined) return 0;
+  if (typeof v === "number") return v;
+  const parsed = Number(v);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -165,10 +176,38 @@ function PaymentBreakdownTable({
 }
 
 // ---------------------------------------------------------------------------
-// Main page
+// Tab button
 // ---------------------------------------------------------------------------
 
-export default function MisReportPage() {
+function TabButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
+        active
+          ? "border-primary text-foreground"
+          : "border-transparent text-muted-foreground hover:text-foreground"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Monthly Summary section (existing behaviour)
+// ---------------------------------------------------------------------------
+
+function MonthlySummarySection() {
   const supabase = React.useMemo(() => createClient(), []);
   const [expandedMonth, setExpandedMonth] = React.useState<string | null>(null);
 
@@ -222,14 +261,6 @@ export default function MisReportPage() {
 
   return (
     <div className="space-y-6">
-      {/* Page header */}
-      <div>
-        <h1 className="text-xl font-semibold">Monthly MIS Report</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Invoices by checkout month — settlement-date based payment matching
-        </p>
-      </div>
-
       {/* Summary stat tiles */}
       {isLoading ? (
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
@@ -349,6 +380,171 @@ export default function MisReportPage() {
           )}
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Yatra Monthly Deductions section (Y7)
+// ---------------------------------------------------------------------------
+
+function YatraMonthlyDeductionsSection() {
+  const supabase = React.useMemo(() => createClient(), []);
+
+  const yatraQ = useQuery({
+    queryKey: ["mis.yatra-monthly-deductions"],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("v_yatra_monthly_deductions")
+        .select("*")
+        .order("month_start", { ascending: false });
+      if (error) throw error;
+      return (data ?? []) as YatraMonthlyDeduction[];
+    },
+  });
+
+  const totals = React.useMemo(() => {
+    const rows = yatraQ.data ?? [];
+    return rows.reduce(
+      (acc, r) => ({
+        bookings_count: acc.bookings_count + (r.bookings_count ?? 0),
+        total_tariff_sum: acc.total_tariff_sum + num(r.total_tariff_sum),
+        yatra_commission_amt_sum:
+          acc.yatra_commission_amt_sum + num(r.yatra_commission_amt_sum),
+        yatra_commission_with_gst_sum:
+          acc.yatra_commission_with_gst_sum + num(r.yatra_commission_with_gst_sum),
+        tds_amt_sum: acc.tds_amt_sum + num(r.tds_amt_sum),
+        gst_on_commission_sum: acc.gst_on_commission_sum + num(r.gst_on_commission_sum),
+        tcs_amt_sum: acc.tcs_amt_sum + num(r.tcs_amt_sum),
+        yatra_to_pay_hotel_sum:
+          acc.yatra_to_pay_hotel_sum + num(r.yatra_to_pay_hotel_sum),
+      }),
+      {
+        bookings_count: 0,
+        total_tariff_sum: 0,
+        yatra_commission_amt_sum: 0,
+        yatra_commission_with_gst_sum: 0,
+        tds_amt_sum: 0,
+        gst_on_commission_sum: 0,
+        tcs_amt_sum: 0,
+        yatra_to_pay_hotel_sum: 0,
+      }
+    );
+  }, [yatraQ.data]);
+
+  return (
+    <div className="space-y-6">
+      {/* Summary stat tiles */}
+      {yatraQ.isLoading ? (
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+          {[1, 2, 3, 4].map((i) => (
+            <Card key={i}>
+              <CardContent className="py-5">
+                <div className="h-4 w-24 animate-pulse rounded bg-muted" />
+                <div className="mt-2 h-7 w-32 animate-pulse rounded bg-muted" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      ) : yatraQ.isError ? null : (
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+          <StatTile title="Reconciled Bookings" value={totals.bookings_count.toLocaleString("en-IN")} />
+          <StatTile title="Total Tariff" value={formatINR(totals.total_tariff_sum)} />
+          <StatTile title="Total Deductions (Comm+GST)" value={formatINR(totals.yatra_commission_with_gst_sum)} />
+          <StatTile title="Net to Hotel" value={formatINR(totals.yatra_to_pay_hotel_sum)} />
+        </div>
+      )}
+
+      {/* Main table */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Yatra Monthly Deductions</CardTitle>
+        </CardHeader>
+        <CardContent className="p-0">
+          {yatraQ.isLoading ? (
+            <div className="p-6 text-sm text-muted-foreground">Loading Yatra deductions…</div>
+          ) : yatraQ.isError ? (
+            <div className="p-6 text-sm text-red-700">
+              Failed to load Yatra deductions: {(yatraQ.error as Error | null)?.message ?? "Unknown error"}
+              <button
+                className="ml-3 text-primary underline"
+                onClick={() => yatraQ.refetch()}
+              >
+                Retry
+              </button>
+            </div>
+          ) : (yatraQ.data?.length ?? 0) === 0 ? (
+            <div className="p-6 text-sm text-muted-foreground">
+              No reconciled Yatra bookings yet. Rows appear here as Yatra invoices are reconciled.
+            </div>
+          ) : (
+            <Table>
+              <THead>
+                <TR>
+                  <TH>Month</TH>
+                  <TH className="text-right">Bookings</TH>
+                  <TH className="text-right">Total Tariff</TH>
+                  <TH className="text-right">Commission</TH>
+                  <TH className="text-right">Commission+GST</TH>
+                  <TH className="text-right">TDS</TH>
+                  <TH className="text-right">GST on Commission</TH>
+                  <TH className="text-right">TCS</TH>
+                  <TH className="text-right">Net to Hotel</TH>
+                </TR>
+              </THead>
+              <TBody>
+                {yatraQ.data!.map((row) => (
+                  <TR key={row.month_start}>
+                    <TD className="font-medium">{formatMonthLabel(row.month_start)}</TD>
+                    <TD className="text-right tabular-nums">{row.bookings_count}</TD>
+                    <TD className="text-right tabular-nums">{formatINR(num(row.total_tariff_sum))}</TD>
+                    <TD className="text-right tabular-nums">{formatINR(num(row.yatra_commission_amt_sum))}</TD>
+                    <TD className="text-right tabular-nums">{formatINR(num(row.yatra_commission_with_gst_sum))}</TD>
+                    <TD className="text-right tabular-nums">{formatINR(num(row.tds_amt_sum))}</TD>
+                    <TD className="text-right tabular-nums">{formatINR(num(row.gst_on_commission_sum))}</TD>
+                    <TD className="text-right tabular-nums">{formatINR(num(row.tcs_amt_sum))}</TD>
+                    <TD className="text-right tabular-nums font-medium">{formatINR(num(row.yatra_to_pay_hotel_sum))}</TD>
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main page
+// ---------------------------------------------------------------------------
+
+export default function MisReportPage() {
+  const [tab, setTab] = React.useState<MisTab>("summary");
+
+  return (
+    <div className="space-y-6">
+      {/* Page header */}
+      <div>
+        <h1 className="text-xl font-semibold">Monthly MIS Report</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Invoices by checkout month — settlement-date based payment matching
+        </p>
+      </div>
+
+      {/* Tabs */}
+      <div className="border-b">
+        <nav className="-mb-px flex gap-2">
+          <TabButton active={tab === "summary"} onClick={() => setTab("summary")}>
+            Monthly Summary
+          </TabButton>
+          <TabButton active={tab === "yatra"} onClick={() => setTab("yatra")}>
+            Yatra Deductions
+          </TabButton>
+        </nav>
+      </div>
+
+      {tab === "summary" ? <MonthlySummarySection /> : <YatraMonthlyDeductionsSection />}
     </div>
   );
 }

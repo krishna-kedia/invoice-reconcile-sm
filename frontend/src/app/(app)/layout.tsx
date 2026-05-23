@@ -22,15 +22,19 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     { href: "/admin", label: "Home" },
     { href: "/invoices", label: "Invoices" },
     { href: "/bank-statement", label: "Bank Statement" },
+    { href: "/payment-folio", label: "Payment Folio" },
     { href: "/admin/approvals", label: "Approvals" },
     { href: "/admin/discrepancies", label: "Discrepancies" },
     { href: "/admin/mis", label: "MIS Report" },
     { href: "/audit", label: "Audit Log" },
+    { href: "/admin/issues", label: "Issues" },
     { href: "/admin/settings/payment-sources", label: "Settings" },
+    { href: "/admin/settings/issue-categories", label: "Issue Categories" },
   ];
   const operatorLinks = [
     { href: "/invoices", label: "Invoices" },
     { href: "/bank-statement", label: "Bank Statement" },
+    { href: "/payment-folio", label: "Payment Folio" },
     { href: "/audit", label: "Audit Log" },
   ];
   const links = isAdmin ? adminLinks : operatorLinks;
@@ -38,7 +42,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   return (
     <div className="min-h-screen bg-muted/20">
       <header className="border-b bg-card">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3">
+        <div className="flex items-center justify-between px-6 py-3">
           <div className="flex items-center gap-3">
             <div className="font-semibold">Hotel Reconciliation</div>
             <Badge variant={isAdmin ? "info" : "outline"}>{isAdmin ? "Admin" : "Operator"}</Badge>
@@ -49,7 +53,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
           </div>
         </div>
       </header>
-      <div className="mx-auto flex max-w-7xl gap-6 px-4 py-6">
+      <div className="flex gap-6 px-6 py-6">
         <aside className="w-52 shrink-0">
           <nav className="space-y-1">
             {links.map((l) => (

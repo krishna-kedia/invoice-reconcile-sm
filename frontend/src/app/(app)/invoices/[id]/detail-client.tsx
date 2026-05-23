@@ -19,9 +19,12 @@ import Link from "next/link";
 import type {
   HotelInvoice, NewLinkInput, PaymentMethod, ReconciliationLink, SourceTable, TransactionRow, AuditLogRow
 } from "@/lib/types";
+import { usePaymentSuggestions } from "@/hooks/use-payment-suggestions";
 import { MmtReconcilePanel } from "./mmt-reconcile-panel";
 import { YatraReconcilePanel } from "./yatra-reconcile-panel";
 import { AgodaReconcilePanel } from "./agoda-reconcile-panel";
+import { IssueReportCard } from "@/components/issue/issue-report-card";
+import { ReportIssueDialog } from "@/components/issue/report-issue-dialog";
 
 const METHODS: { value: PaymentMethod; label: string }[] = [
   { value: "upi", label: "UPI" },
@@ -124,6 +127,26 @@ export function InvoiceDetailClient({
     return defaultCandidate?.yatra_to_pay_hotel ?? null;
   }, [isYatra, yatraCandidatesQ.data]);
 
+  // Fetch open issue report status for this invoice (used to derive hasOpenReport for the button)
+  const issueReportQ = useQuery({
+    queryKey: ["issue-report", inv.id],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("invoice_issue_reports")
+        .select("id, status")
+        .eq("invoice_id", inv.id)
+        .order("reported_at", { ascending: false })
+        .limit(1);
+      if (error) throw error;
+      return (data || []) as Array<{ id: string; status: string }>;
+    },
+  });
+
+  const hasOpenReport =
+    (issueReportQ.data?.[0]?.status ?? null) === "open";
+
+  const suggestionsQ = usePaymentSuggestions(inv.id);
+
   const linkedTotal = (linksQ.data || []).reduce((s, l) => s + Number(l.amount_applied), 0);
   // For MMT use net receivable; for Yatra use yatra_to_pay_hotel; else grand_total
   const reconciliationTarget = netReceivable ?? yatraNetReceivable ?? Number(inv.grand_total);
@@ -139,11 +162,22 @@ export function InvoiceDetailClient({
             <span className="ml-3"><StatusBadge status={inv.reconciliation_status} /></span>
           </h1>
         </div>
-        {outstanding > 0.0001 && (
-          <a href="#add-payment">
-            <Button>Reconcile now</Button>
-          </a>
-        )}
+        <div className="flex items-center gap-2">
+          <ReportIssueDialog
+            invoiceId={inv.id}
+            invoiceSource={inv.source}
+            hasOpenReport={hasOpenReport}
+            onReported={() => {
+              qc.invalidateQueries({ queryKey: ["issue-report", inv.id] });
+              qc.invalidateQueries({ queryKey: ["invoices.walkin"] });
+            }}
+          />
+          {outstanding > 0.0001 && (
+            <a href="#add-payment">
+              <Button>Reconcile now</Button>
+            </a>
+          )}
+        </div>
       </div>
 
       <Card>
@@ -254,6 +288,18 @@ export function InvoiceDetailClient({
         </CardContent>
       </Card>
 
+      {/* Issue Report card — shown above reconcile panels when a report exists */}
+      <IssueReportCard
+        invoiceId={inv.id}
+        currentUserId={currentUserId}
+        currentRole={currentRole}
+        invoiceStatus={inv.reconciliation_status ?? "unreconciled"}
+        onReportChanged={() => {
+          qc.invalidateQueries({ queryKey: ["issue-report", inv.id] });
+          qc.invalidateQueries({ queryKey: ["invoices.walkin"] });
+        }}
+      />
+
       {/* Linked payments: shown BEFORE payment panels for reconciled/partial, AFTER for unreconciled */}
       {inv.reconciliation_status !== "unreconciled" && (
         <LinkedPayments
@@ -304,6 +350,17 @@ export function InvoiceDetailClient({
         invoice={inv}
         outstanding={outstanding}
         initialOpen={!isMmtSource(inv.source) && !isYatraSource(inv.source) && !isAgodaSource(inv.source)}
+        initialMethod={
+          (suggestionsQ.data ?? []).length === 1
+            ? (suggestionsQ.data![0].payment_method as PaymentMethod | undefined)
+            : undefined
+        }
+        initialDate={
+          (suggestionsQ.data ?? []).length === 1
+            ? (suggestionsQ.data![0].received_date ?? undefined)
+            : undefined
+        }
+        fromFolio={(suggestionsQ.data ?? []).length === 1}
         onSaved={() => {
           qc.invalidateQueries({ queryKey: ["links", inv.id] });
           qc.invalidateQueries({ queryKey: ["invoice", inv.id] });
@@ -459,17 +516,31 @@ function LinkedPayments({
 // ---------------- Add Payment Panel ----------------
 
 function AddPaymentPanel({
-  invoice, outstanding, onSaved, initialOpen = true,
-}: { invoice: HotelInvoice; outstanding: number; onSaved: () => void; initialOpen?: boolean }) {
+  invoice, outstanding, onSaved, initialOpen = true, initialMethod, initialDate, fromFolio = false,
+}: { invoice: HotelInvoice; outstanding: number; onSaved: () => void; initialOpen?: boolean; initialMethod?: PaymentMethod; initialDate?: string; fromFolio?: boolean }) {
   const supabase = React.useMemo(() => createClient(), []);
   const toast = useToast();
   const router = useRouter();
   const [panelOpen, setPanelOpen] = React.useState(initialOpen);
-  const [method, setMethod] = React.useState<PaymentMethod>("upi");
-  const [date, setDate] = React.useState("");
-  const [debouncedDate, setDebouncedDate] = React.useState("");
-  // Once the user picks a date, never auto-override it on method changes
-  const userHasEditedDate = React.useRef(false);
+  const [method, setMethod] = React.useState<PaymentMethod>(initialMethod ?? "upi");
+  const [date, setDate] = React.useState(initialDate ?? "");
+  const [debouncedDate, setDebouncedDate] = React.useState(initialDate ?? "");
+  const userHasEditedDate = React.useRef(!!initialDate);
+  const [methodFromFolio, setMethodFromFolio] = React.useState<boolean>(fromFolio && !!initialMethod);
+  const [dateFromFolio, setDateFromFolio] = React.useState<boolean>(fromFolio && !!initialDate);
+  // folioApplied ensures we apply folio values exactly once when the async query resolves.
+  const folioApplied = React.useRef(false);
+  React.useEffect(() => {
+    if (fromFolio && initialMethod && initialDate && !folioApplied.current) {
+      folioApplied.current = true;
+      setMethod(initialMethod);
+      setDate(initialDate);
+      setDebouncedDate(initialDate);
+      setMethodFromFolio(true);
+      setDateFromFolio(true);
+      userHasEditedDate.current = true;
+    }
+  }, [fromFolio, initialMethod, initialDate]);
   const [cashAmount, setCashAmount] = React.useState("");
   const [pending, setPending] = React.useState<NewLinkInput[]>([]);
   const [pickTxn, setPickTxn] = React.useState<TransactionRow | null>(null);
@@ -707,21 +778,38 @@ function AddPaymentPanel({
         )}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <div>
-            <Label>Method</Label>
-            <Select value={method} onChange={(e) => setMethod(e.target.value as PaymentMethod)}>
+            <div className="flex items-center gap-2">
+              <Label>Method</Label>
+              {methodFromFolio && (
+                <span className="text-xs text-muted-foreground">From folio</span>
+              )}
+            </div>
+            <Select
+              value={method}
+              onChange={(e) => {
+                setMethod(e.target.value as PaymentMethod);
+                setMethodFromFolio(false);
+              }}
+            >
               {METHODS.map((m) => (<option key={m.value} value={m.value}>{m.label}</option>))}
             </Select>
           </div>
           <div>
-            <Label>
-              {method === "upi" || method === "card" ? "Settlement date" : "Date"}
-            </Label>
+            <div className="flex items-center gap-2">
+              <Label>
+                {method === "upi" || method === "card" ? "Settlement date" : "Date"}
+              </Label>
+              {dateFromFolio && (
+                <span className="text-xs text-muted-foreground">From folio</span>
+              )}
+            </div>
             <Input
               type="date"
               value={date}
               onChange={(e) => {
                 userHasEditedDate.current = true;
                 setDate(e.target.value);
+                setDateFromFolio(false);
               }}
             />
             {method !== "cash" && (

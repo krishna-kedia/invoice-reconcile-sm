@@ -18,7 +18,9 @@ import type {
   BankStatementDrillUpi,
   BankStatementDrillCard,
   BankStatementDrillMmt,
+  BankStatementDrillYatra,
   BankStatementDrillType,
+  BankStatementDrillReconciledInvoice,
   PaymentMethod,
 } from "@/lib/types";
 
@@ -246,6 +248,7 @@ const ALL_DRILLS: { value: string; label: string }[] = [
   { value: "upi_settlement", label: "UPI settlement" },
   { value: "card_settlement", label: "Card settlement" },
   { value: "mmt_payout", label: "MMT payout" },
+  { value: "yatra_payout", label: "Yatra" },
   { value: "none", label: "No drill-down" },
 ];
 
@@ -272,21 +275,21 @@ function methodBadgeVariant(m: PaymentMethod | null): {
   }
 }
 
-function drillLabel(t: BankStatementDrillType, count: { upi: number; card: number; mmt: number }): string | null {
+function drillLabel(t: BankStatementDrillType, count: { upi: number; card: number; mmt: number; yatra: number }): string | null {
   if (!t) return null;
   if (t === "upi_settlement")  return `${count.upi} UPI ${count.upi === 1 ? "transaction" : "transactions"}`;
   if (t === "card_settlement") return `${count.card} card ${count.card === 1 ? "transaction" : "transactions"}`;
   if (t === "mmt_payout")      return `${count.mmt} MMT ${count.mmt === 1 ? "booking" : "bookings"}`;
+  if (t === "yatra_payout")    return `${count.yatra} Yatra ${count.yatra === 1 ? "booking" : "bookings"}`;
   return null;
 }
 
-// Change 4: row color based on total_amount_applied vs deposit_amt
 function rowColorClass(r: BankStatementRow): string {
-  if (r.split_index > 1) return ""; // split rows inherit from parent visual
   const applied = r.total_amount_applied ?? 0;
-  if (applied <= 0) return ""; // unreconciled — no color
-  if (applied >= r.deposit_amt) return "bg-green-50 hover:bg-green-100"; // fully applied
-  return "bg-yellow-50 hover:bg-yellow-100"; // partially applied
+  if (applied <= 0) return "";
+  if (Math.abs(applied - r.deposit_amt) < 1) return "bg-green-50 hover:bg-green-100";
+  if (applied > 0 && applied < r.deposit_amt) return "bg-amber-50 hover:bg-amber-100";
+  return "";
 }
 
 export function BankStatementClient({ currentRole: _currentRole }: { currentRole: "admin" | "operator" }) {
@@ -418,6 +421,7 @@ export function BankStatementClient({ currentRole: _currentRole }: { currentRole
         "UPI count": r.drill_count?.upi ?? 0,
         "Card count": r.drill_count?.card ?? 0,
         "MMT count": r.drill_count?.mmt ?? 0,
+        "Yatra count": r.drill_count?.yatra ?? 0,
         "Split index": r.split_index,
         "Split total": r.split_total,
       }));
@@ -522,8 +526,9 @@ export function BankStatementClient({ currentRole: _currentRole }: { currentRole
                       type="button"
                       onClick={() => toggleMethod(m.value)}
                       className={cn(
-                        "rounded-md border px-2 py-1 text-xs font-medium transition",
-                        active ? "border-primary bg-primary text-primary-foreground" : "border-border hover:bg-muted"
+                        active
+                          ? "rounded-md border border-primary bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                          : "rounded-md border border-input bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                       )}
                     >
                       {m.label}
@@ -543,8 +548,9 @@ export function BankStatementClient({ currentRole: _currentRole }: { currentRole
                       type="button"
                       onClick={() => toggleDrill(d.value)}
                       className={cn(
-                        "rounded-md border px-2 py-1 text-xs font-medium transition",
-                        active ? "border-primary bg-primary text-primary-foreground" : "border-border hover:bg-muted"
+                        active
+                          ? "rounded-md border border-primary bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                          : "rounded-md border border-input bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                       )}
                     >
                       {d.label}
@@ -588,20 +594,26 @@ export function BankStatementClient({ currentRole: _currentRole }: { currentRole
                 {rows.map((r) => {
                   const rowKey = `${r.bank_id}-${r.split_index}`;
                   const isSplit = r.split_index > 1;
-                  // Change 4: amber border only when truly unreconciled (total_amount_applied is 0/null)
-                  const isUnreconciled = (r.total_amount_applied ?? 0) <= 0 && r.link_id === null;
                   const canExpand = r.split_index === 1 && r.drill_type !== null;
                   const isOpen = !!expanded[r.bank_id];
                   const muted = isSplit ? "text-muted-foreground" : "";
-                  const borderCls = isUnreconciled && !isSplit ? "border-l-2 border-gray-700" : "";
                   const colorCls = rowColorClass(r);
 
                   return (
                     <React.Fragment key={rowKey}>
-                      {/* Change 3: entire row clickable when canExpand */}
                       <TR
-                        className={cn(borderCls, colorCls, canExpand ? "cursor-pointer" : "")}
+                        className={cn(
+                          colorCls,
+                          canExpand && "cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+                        )}
                         onClick={canExpand ? () => setExpanded((s) => ({ ...s, [r.bank_id]: !s[r.bank_id] })) : undefined}
+                        tabIndex={canExpand ? 0 : undefined}
+                        onKeyDown={canExpand ? (e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            setExpanded((s) => ({ ...s, [r.bank_id]: !s[r.bank_id] }));
+                          }
+                        } : undefined}
                       >
                         <TD className={muted}>
                           {isSplit ? <span className="italic">↳ split</span> : formatDate(r.date)}
@@ -744,6 +756,38 @@ export function BankStatementClient({ currentRole: _currentRole }: { currentRole
   );
 }
 
+// ---------------------------------------------------------------------------
+// DrillDown helpers
+// ---------------------------------------------------------------------------
+
+function ReconciledToCell({ invoices }: { invoices: BankStatementDrillReconciledInvoice[] }) {
+  if (!invoices || invoices.length === 0) {
+    return <span className="text-muted-foreground">—</span>;
+  }
+  return (
+    <>
+      {invoices.map((inv) => (
+        <div key={inv.hotel_invoice_id}>
+          <Link
+            href={`/invoices/${inv.hotel_invoice_id}`}
+            onClick={(e) => e.stopPropagation()}
+            className="text-primary underline-offset-2 hover:underline text-xs"
+          >
+            {inv.invoice_number}
+          </Link>
+        </div>
+      ))}
+    </>
+  );
+}
+
+function drillRowTintClass(appliedTotal: number | null, baseAmount: number): string {
+  if (!appliedTotal || appliedTotal <= 0) return "";
+  if (Math.abs(appliedTotal - baseAmount) < 1) return "bg-green-50";
+  if (appliedTotal > 0 && appliedTotal < baseAmount) return "bg-amber-50";
+  return "";
+}
+
 function DrillDown({ bankId, drillType }: { bankId: string; drillType: NonNullable<BankStatementDrillType> }) {
   const supabase = React.useMemo(() => createClient(), []);
   const q = useQuery({
@@ -789,23 +833,19 @@ function DrillDown({ bankId, drillType }: { bankId: string; drillType: NonNullab
               <TH>VPA</TH>
               <TH>UPI txn id</TH>
               <TH className="text-right">Amount</TH>
-              <TH>Invoice</TH>
+              <TH>Reconciled To</TH>
             </TR>
           </THead>
           <TBody>
             {(rows as BankStatementDrillUpi[]).map((u) => (
-              <TR key={u.id} className={u.invoice_id ? "bg-green-50" : ""}>
+              <TR key={u.id} className={cn(drillRowTintClass(u.applied_total, u.base_amount))}>
                 <TD>{formatDate(u.transaction_date)}</TD>
                 <TD>{formatDate(u.settlement_date)}</TD>
                 <TD className="font-mono text-xs">{u.vpa || "—"}</TD>
                 <TD className="font-mono text-xs">{u.upi_transaction_id || "—"}</TD>
                 <TD className="text-right tabular-nums">{formatINR(u.amount)}</TD>
                 <TD>
-                  {u.invoice_id ? (
-                    <Link href={`/invoices/${u.invoice_id}`} className="text-primary underline-offset-2 hover:underline text-xs">
-                      {u.invoice_number}
-                    </Link>
-                  ) : <span className="text-muted-foreground">—</span>}
+                  <ReconciledToCell invoices={u.reconciled_invoices ?? []} />
                 </TD>
               </TR>
             ))}
@@ -829,23 +869,19 @@ function DrillDown({ bankId, drillType }: { bankId: string; drillType: NonNullab
               <TH className="text-right">Gross</TH>
               <TH className="text-right">MDR %</TH>
               <TH className="text-right">Net after MDR</TH>
-              <TH>Invoice</TH>
+              <TH>Reconciled To</TH>
             </TR>
           </THead>
           <TBody>
             {(rows as BankStatementDrillCard[]).map((c) => (
-              <TR key={c.id} className={c.invoice_id ? "bg-green-50" : ""}>
+              <TR key={c.id} className={cn(drillRowTintClass(c.applied_total, c.base_amount))}>
                 <TD>{formatDate(c.transaction_date)}</TD>
                 <TD>{formatDate(c.settlement_date)}</TD>
                 <TD className="text-right tabular-nums">{formatINR(c.gross_amount)}</TD>
                 <TD className="text-right tabular-nums">{Number(c.mdr_percent).toFixed(2)}%</TD>
                 <TD className="text-right tabular-nums">{formatINR(c.net_after_mdr)}</TD>
                 <TD>
-                  {c.invoice_id ? (
-                    <Link href={`/invoices/${c.invoice_id}`} className="text-primary underline-offset-2 hover:underline text-xs">
-                      {c.invoice_number}
-                    </Link>
-                  ) : <span className="text-muted-foreground">—</span>}
+                  <ReconciledToCell invoices={c.reconciled_invoices ?? []} />
                 </TD>
               </TR>
             ))}
@@ -855,46 +891,71 @@ function DrillDown({ bankId, drillType }: { bankId: string; drillType: NonNullab
     );
   }
 
+  if (drillType === "mmt_payout") {
+    return (
+      <div className="py-3 pr-6">
+        <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          MMT bookings in this payout ({rows.length})
+        </div>
+        <Table className="w-full table-auto border border-gray-200 [&_th]:border-r [&_th]:border-gray-200 [&_td]:border-r [&_td]:border-gray-200">
+          <THead>
+            <TR>
+              <TH>Booking ID</TH>
+              <TH>PNR</TH>
+              <TH>Guest</TH>
+              <TH>Hotel</TH>
+              <TH>Check-in</TH>
+              <TH>Check-out</TH>
+              <TH className="text-right">Payable</TH>
+              <TH>Reconciled To</TH>
+            </TR>
+          </THead>
+          <TBody>
+            {(rows as BankStatementDrillMmt[]).map((m) => (
+              <TR key={m.id} className={cn(drillRowTintClass(m.applied_total, m.base_amount))}>
+                <TD className="font-mono text-xs">{m.booking_id}</TD>
+                <TD className="font-mono text-xs">{m.booking_pnr || "—"}</TD>
+                <TD>{m.client_name || "—"}</TD>
+                <TD className="max-w-[180px] truncate" title={m.hotel_name || ""}>{m.hotel_name || "—"}</TD>
+                <TD>{formatDate(m.check_in)}</TD>
+                <TD>{formatDate(m.check_out)}</TD>
+                <TD className="text-right tabular-nums">{formatINR(m.payable)}</TD>
+                <TD>
+                  <ReconciledToCell invoices={m.reconciled_invoices ?? []} />
+                </TD>
+              </TR>
+            ))}
+          </TBody>
+        </Table>
+      </div>
+    );
+  }
+
+  // yatra_payout
   return (
     <div className="py-3 pr-6">
       <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-        MMT bookings in this payout ({rows.length})
+        Yatra bookings in this payout ({rows.length})
       </div>
       <Table className="w-full table-auto border border-gray-200 [&_th]:border-r [&_th]:border-gray-200 [&_td]:border-r [&_td]:border-gray-200">
         <THead>
           <TR>
-            <TH>Booking ID</TH>
-            <TH>PNR</TH>
+            <TH>Voucher No</TH>
             <TH>Guest</TH>
             <TH>Hotel</TH>
-            <TH>Check-in</TH>
-            <TH>Check-out</TH>
-            <TH className="text-right">Payable</TH>
-            <TH>Hotel invoice</TH>
+            <TH className="text-right">Amount</TH>
+            <TH>Reconciled To</TH>
           </TR>
         </THead>
         <TBody>
-          {(rows as BankStatementDrillMmt[]).map((m) => (
-            // Change 7: pastel green for reconciled MMT rows
-            <TR key={m.id} className={m.is_reconciled ? "bg-green-50" : ""}>
-              <TD className="font-mono text-xs">{m.booking_id}</TD>
-              <TD className="font-mono text-xs">{m.booking_pnr || "—"}</TD>
-              <TD>{m.client_name || "—"}</TD>
-              <TD className="max-w-[180px] truncate" title={m.hotel_name || ""}>{m.hotel_name || "—"}</TD>
-              <TD>{formatDate(m.check_in)}</TD>
-              <TD>{formatDate(m.check_out)}</TD>
-              <TD className="text-right tabular-nums">{formatINR(m.payable)}</TD>
+          {(rows as BankStatementDrillYatra[]).map((y) => (
+            <TR key={y.id} className={cn(drillRowTintClass(y.applied_total, y.base_amount))}>
+              <TD className="font-mono text-xs">{y.voucher_no}</TD>
+              <TD>{y.guest_name || "—"}</TD>
+              <TD className="max-w-[180px] truncate" title={y.hotel_name || ""}>{y.hotel_name || "—"}</TD>
+              <TD className="text-right tabular-nums">{formatINR(y.yatra_to_pay_hotel)}</TD>
               <TD>
-                {m.hotel_invoice_id ? (
-                  <Link
-                    href={`/invoices/${m.hotel_invoice_id}`}
-                    className="text-primary underline-offset-2 hover:underline"
-                  >
-                    {m.hotel_invoice_number || "open"}
-                  </Link>
-                ) : (
-                  <span className="text-muted-foreground">—</span>
-                )}
+                <ReconciledToCell invoices={y.reconciled_invoices ?? []} />
               </TD>
             </TR>
           ))}

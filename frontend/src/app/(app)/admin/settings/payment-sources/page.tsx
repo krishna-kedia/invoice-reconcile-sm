@@ -36,7 +36,7 @@ export default function PaymentSourcesPage() {
     if (!q.data) return;
     const next: Record<string, Set<SourceTable>> = { upi: new Set(), card: new Set(), bank_transfer: new Set(), cash: new Set() };
     for (const row of q.data) {
-      if (row.is_active) next[row.payment_method].add(row.source_table);
+      if (row.is_active && next[row.payment_method]) next[row.payment_method].add(row.source_table);
     }
     setDraft(next as any);
   }, [q.data]);
