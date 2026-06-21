@@ -1,12 +1,13 @@
 """Supabase database client wrapper"""
 
+import logging
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 import pandas as pd
 from supabase import create_client, Client
 
 from .models import (
-    FileRecord, FileStatus, OCROutput, Extraction, 
+    FileRecord, FileStatus, OCROutput, Extraction,
     ProcessingLog, OperationType, LogStatus
 )
 from .table_manager import sanitize_table_name, get_column_name
@@ -14,6 +15,27 @@ from .excel_inserter import ExcelDirectInserter
 from .mmt_payout_inserter import MmtPayoutInserter
 from .yatra_payout_inserter import YatraPayoutInserter
 from .agoda_payout_inserter import AgodaPayoutInserter
+
+logger = logging.getLogger('invoice_reconcile')
+
+
+class DuplicateInvoiceError(Exception):
+    """Raised when inserting a hotel_invoice row violates the invoice_number UNIQUE constraint.
+
+    This is not a hard failure — it means another worker (or a previous run)
+    already inserted the same invoice.  The caller should mark the file as
+    failed/skipped with a descriptive message and NOT re-raise so the worker
+    continues processing other files.
+
+    Attributes:
+        invoice_number: The duplicate invoice number that triggered the violation.
+        file_id: The files.id of the file being processed.
+    """
+
+    def __init__(self, invoice_number: str, file_id: str):
+        self.invoice_number = invoice_number
+        self.file_id = file_id
+        super().__init__(f"Duplicate invoice_number: {invoice_number}")
 
 
 class DatabaseClient:
@@ -60,27 +82,52 @@ class DatabaseClient:
             return FileRecord.from_dict(result.data[0])
         return None
     
-    def get_pending_files(self, max_retries: int) -> List[FileRecord]:
-        """Get files that need processing (pending or failed with retries available).
-        
+    def get_pending_files(self, max_retries: int, batch_limit: int = 100) -> List[FileRecord]:
+        """Atomically claim pending files and also fetch eligible failed files.
+
+        Pending rows are claimed via rpc_claim_next_files, which runs
+        SELECT FOR UPDATE SKIP LOCKED + UPDATE status='processing' in a single
+        Postgres function body. This prevents multiple workers from picking up
+        the same row when max_parallel_workers > 1 (DUP-2).
+
+        Failed rows are read with a plain SELECT because they are already in a
+        terminal state — a re-processing worker will update them to 'processing'
+        at the start of process_file via update_file_status, and a concurrent
+        worker racing on the same failed row is harmless (last-writer-wins on a
+        failed → processing transition does not produce duplicate output).
+
         Args:
             max_retries: Maximum number of retries allowed
-            
+            batch_limit: Max pending rows to claim in one call (default 100)
+
         Returns:
-            List of FileRecord instances
+            List of FileRecord instances ordered: claimed pending first, then
+            eligible failed rows.
         """
-        # Get pending files
-        pending = self.client.table('files').select('*').eq('status', FileStatus.PENDING.value).execute()
-        
-        # Get failed files with retry_count < max_retries
-        failed = self.client.table('files').select('*').eq('status', FileStatus.FAILED.value).lt('ocr_retry_count', max_retries).execute()
-        
+        # Atomically claim pending rows — status is already set to 'processing'
+        # by the RPC, so process_file's update_file_status(PROCESSING) call is
+        # a no-op for these rows (idempotent UPDATE).
+        claimed = self.client.rpc(
+            'rpc_claim_next_files',
+            {'p_limit': batch_limit}
+        ).execute()
+
+        # Get failed files that still have retries remaining (plain SELECT is
+        # safe — no race condition on already-failed rows).
+        failed = (
+            self.client.table('files')
+            .select('*')
+            .eq('status', FileStatus.FAILED.value)
+            .lt('ocr_retry_count', max_retries)
+            .execute()
+        )
+
         files = []
-        if pending.data:
-            files.extend([FileRecord.from_dict(row) for row in pending.data])
+        if claimed.data:
+            files.extend([FileRecord.from_dict(row) for row in claimed.data])
         if failed.data:
             files.extend([FileRecord.from_dict(row) for row in failed.data])
-        
+
         return files
     
     def update_file_status(self, file_id: str, status: FileStatus, 
@@ -254,39 +301,76 @@ class DatabaseClient:
             result = self.client.table(main_table_name).insert(main_data).execute()
             if not result.data:
                 raise ValueError(f"Failed to insert into {main_table_name} table")
-            
+
             main_record_id = result.data[0]['id']
-            
+
             # Insert into child tables
             for array_field_name, array_value in array_data.items():
                 if not isinstance(array_value, list):
                     continue  # Skip if not an array
-                
+
                 array_field_config = array_field_names[array_field_name]
                 child_table_name = sanitize_table_name(array_field_config['child_table'])
-                
+
                 # Prepare child table records
                 child_records = []
                 for item in array_value:
                     if not isinstance(item, dict):
                         continue
-                    
+
                     child_record = {f"{main_table_name}_id": main_record_id}
                     for child_field in array_field_config['child_fields']:
                         child_field_name = child_field['name']
                         child_column_name = get_column_name(child_field_name)
                         if child_field_name in item:
                             child_record[child_column_name] = item[child_field_name]
-                    
+
                     child_records.append(child_record)
-                
+
                 # Bulk insert child records
                 if child_records:
                     self.client.table(child_table_name).insert(child_records).execute()
-        
+
+        except DuplicateInvoiceError:
+            # Already a DuplicateInvoiceError from a nested call — propagate as-is.
+            raise
+
         except Exception as e:
-            # Re-raise with more context
-            raise ValueError(f"Failed to insert into {main_table_name} table: {str(e)}")
+            error_str = str(e)
+
+            # Detect PostgreSQL UNIQUE violation (error code 23505) on the
+            # hotel_invoice table's invoice_number constraint (added in DUP-1).
+            # PostgREST surfaces this as a plain exception whose message contains
+            # the constraint name or the pg error code.
+            if (
+                main_table_name == 'hotel_invoice'
+                and (
+                    'hotel_invoice_invoice_number_unique' in error_str
+                    or '23505' in error_str
+                )
+            ):
+                # Extract the invoice_number from the data we were trying to insert
+                # so we can log it.  Falls back to '<unknown>' if not present.
+                invoice_number = str(main_data.get('invoice_number', '<unknown>'))
+                file_id_val = str(main_data.get('file_id', '<unknown>'))
+
+                logger.warning(
+                    "DUPLICATE_INVOICE_INSERT_SKIPPED",
+                    extra={
+                        "file_id": file_id_val,
+                        "invoice_number": invoice_number,
+                        "constraint": "hotel_invoice_invoice_number_unique",
+                        "table": main_table_name,
+                    }
+                )
+
+                raise DuplicateInvoiceError(
+                    invoice_number=invoice_number,
+                    file_id=file_id_val,
+                ) from e
+
+            # Re-raise all other errors with more context
+            raise ValueError(f"Failed to insert into {main_table_name} table: {error_str}")
     
     # Processing log operations
     def insert_log(self, operation: OperationType, status: LogStatus,

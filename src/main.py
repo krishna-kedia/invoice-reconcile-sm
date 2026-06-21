@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config.loader import Config
-from database.client import DatabaseClient
+from database.client import DatabaseClient, DuplicateInvoiceError
 from database.models import FileStatus, OperationType, LogStatus
 from database.table_manager import ensure_all_tables_exist
 from drive.client import DriveClient
@@ -351,6 +351,51 @@ class InvoiceReconcileSystem:
 
                 db.update_file_status(file_id, FileStatus.COMPLETED)
                 logger.info(f"Successfully processed file: {file_name}")
+
+        except DuplicateInvoiceError as dup_err:
+            # A duplicate invoice_number UNIQUE violation was caught in the
+            # inserter (DUP-2).  This is NOT a hard failure — another worker or
+            # a previous pipeline run already inserted the same invoice.
+            # Log structured, mark the file as FAILED with a clear message, and
+            # do NOT re-raise so this worker continues processing other files.
+            dup_msg = str(dup_err)
+            logger.warning(
+                "DUPLICATE_INVOICE_SKIPPED",
+                extra={
+                    "file_id": file_id,
+                    "file_name": file_name,
+                    "invoice_number": dup_err.invoice_number,
+                    "constraint": "hotel_invoice_invoice_number_unique",
+                }
+            )
+
+            try:
+                db.insert_log(
+                    operation=OperationType.ERROR,
+                    status=LogStatus.FAILURE,
+                    file_id=file_id,
+                    details={
+                        'error': dup_msg,
+                        'file_name': file_name,
+                        'duplicate_invoice_number': dup_err.invoice_number,
+                    }
+                )
+            except Exception as log_error:
+                logger.error(f"Failed to log duplicate-invoice event for {file_name}: {str(log_error)}")
+
+            try:
+                db.update_file_status(
+                    file_id,
+                    FileStatus.FAILED,
+                    error_message=dup_msg,
+                    increment_retry=False  # Do not retry — this is a data duplicate, not a transient error
+                )
+                logger.info(f"File {file_name} marked as FAILED (duplicate invoice skipped)")
+            except Exception as status_error:
+                logger.critical(
+                    f"CRITICAL: Failed to update file status for duplicate-invoice {file_name}: {str(status_error)}"
+                )
+            # No re-raise — worker continues to the next file
 
         except Exception as e:
             error_message = str(e)

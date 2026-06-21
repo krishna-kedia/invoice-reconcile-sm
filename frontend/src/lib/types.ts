@@ -498,6 +498,32 @@ export interface AgodaReconcileCandidatesResponse {
   candidates: AgodaReconcileCandidate[];
 }
 
+// ---------- Manual Payment Entries (MPE-4) ----------
+
+export type ManualPaymentType = 'upi' | 'another_machine' | 'commission' | 'tds'
+export type ManualPaymentStatus = 'pending' | 'approved' | 'rejected'
+
+export interface ManualPaymentEntry {
+  id: string
+  invoice_id: string
+  payment_type: ManualPaymentType
+  status: ManualPaymentStatus
+  submitted_by: string
+  submitter_email?: string
+  reviewed_by?: string
+  reviewed_at?: string
+  amount: number
+  transaction_date: string
+  settlement_date?: string
+  vpa?: string
+  upi_transaction_id?: string
+  party_name?: string
+  note?: string
+  admin_flags: Array<{code: string; [key: string]: unknown}>
+  rejection_reason?: string
+  reconciliation_link_ref?: string
+}
+
 // ---------- Payment Folio ----------
 
 export interface PaymentSuggestion {

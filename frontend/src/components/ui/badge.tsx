@@ -26,7 +26,10 @@ export const Badge = ({ className, variant = "default", ...props }: BadgeProps) 
   />
 );
 
-export function StatusBadge({ status }: { status: ReconciliationStatus | string | null | undefined }) {
+export function StatusBadge({ status, pendingManualPayment }: { status: ReconciliationStatus | string | null | undefined; pendingManualPayment?: boolean }) {
+  if (pendingManualPayment && status === "unreconciled") {
+    return <Badge variant="warning">Pending approval</Badge>;
+  }
   switch (status) {
     case "fully_reconciled":
       return <Badge variant="success">Fully reconciled</Badge>;

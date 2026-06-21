@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { createClient } from "@/lib/supabase/client";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
@@ -24,21 +24,21 @@ export default function InvoicesPage() {
   const [invoiceNumber, setInvoiceNumber] = React.useState("");
   const [amountMin, setAmountMin] = React.useState("");
   const [amountMax, setAmountMax] = React.useState("");
-  const [page, setPage] = React.useState(0);
 
   return (
     <div className="space-y-4">
       <h1 className="text-xl font-semibold">Invoices</h1>
-      <WalkInList
-        status={status} setStatus={setStatus}
-        dateFrom={dateFrom} setDateFrom={setDateFrom}
-        dateTo={dateTo} setDateTo={setDateTo}
-        guest={guest} setGuest={setGuest}
-        invoiceNumber={invoiceNumber} setInvoiceNumber={setInvoiceNumber}
-        amountMin={amountMin} setAmountMin={setAmountMin}
-        amountMax={amountMax} setAmountMax={setAmountMax}
-        page={page} setPage={setPage}
-      />
+      <React.Suspense>
+        <WalkInList
+          status={status} setStatus={setStatus}
+          dateFrom={dateFrom} setDateFrom={setDateFrom}
+          dateTo={dateTo} setDateTo={setDateTo}
+          guest={guest} setGuest={setGuest}
+          invoiceNumber={invoiceNumber} setInvoiceNumber={setInvoiceNumber}
+          amountMin={amountMin} setAmountMin={setAmountMin}
+          amountMax={amountMax} setAmountMax={setAmountMax}
+        />
+      </React.Suspense>
     </div>
   );
 }
@@ -46,15 +46,24 @@ export default function InvoicesPage() {
 function WalkInList(props: any) {
   const supabase = React.useMemo(() => createClient(), []);
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const { status, setStatus, dateFrom, setDateFrom, dateTo, setDateTo, guest, setGuest,
           invoiceNumber, setInvoiceNumber,
-          amountMin, setAmountMin, amountMax, setAmountMax, page, setPage } = props;
+          amountMin, setAmountMin, amountMax, setAmountMax } = props;
+
+  const page = parseInt(searchParams.get("page") ?? "0", 10);
+  const setPage = React.useCallback((newPage: number) => {
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("page", String(newPage));
+    router.push(`${pathname}?${params.toString()}`);
+  }, [searchParams, pathname, router]);
 
   const query = useQuery({
     queryKey: ["invoices.walkin", status, dateFrom, dateTo, guest, invoiceNumber, amountMin, amountMax, page],
     queryFn: async () => {
       let q = supabase.from("v_invoice_list_with_issue")
-        .select("id, invoice_number, guest_name, arrival_time, departure_time, grand_total, reconciliation_status, booking_date, created_at, has_open_issue", { count: "exact" })
+        .select("id, invoice_number, guest_name, arrival_time, departure_time, grand_total, reconciliation_status, booking_date, created_at, has_open_issue, has_pending_manual_payment", { count: "exact" })
         .order("departure_time", { ascending: true })
         .range(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE - 1);
       if (status !== "all") q = q.eq("reconciliation_status", status);
@@ -162,7 +171,7 @@ function WalkInList(props: any) {
                       <TD className="text-right tabular-nums">{formatINR(r.grand_total)}</TD>
                       <TD>
                         <div className="flex items-center gap-1.5 flex-wrap">
-                          <StatusBadge status={r.reconciliation_status} />
+                          <StatusBadge status={r.reconciliation_status} pendingManualPayment={r.has_pending_manual_payment} />
                           {r.has_open_issue && (
                             <Badge variant="destructive" className="text-xs">Issue reported</Badge>
                           )}

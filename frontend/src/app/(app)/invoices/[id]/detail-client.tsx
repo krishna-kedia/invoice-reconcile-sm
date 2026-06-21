@@ -17,7 +17,8 @@ import { useToast } from "@/components/ui/toast";
 import { formatINR, formatDate, formatDateTime } from "@/lib/utils";
 import Link from "next/link";
 import type {
-  HotelInvoice, NewLinkInput, PaymentMethod, ReconciliationLink, SourceTable, TransactionRow, AuditLogRow
+  HotelInvoice, NewLinkInput, PaymentMethod, ReconciliationLink, SourceTable, TransactionRow, AuditLogRow,
+  ManualPaymentEntry, ManualPaymentType,
 } from "@/lib/types";
 import { usePaymentSuggestions } from "@/hooks/use-payment-suggestions";
 import { MmtReconcilePanel } from "./mmt-reconcile-panel";
@@ -145,6 +146,20 @@ export function InvoiceDetailClient({
   const hasOpenReport =
     (issueReportQ.data?.[0]?.status ?? null) === "open";
 
+  const pendingManualQ = useQuery({
+    queryKey: ["pending_manual_count", inv.id],
+    queryFn: async () => {
+      const { count, error } = await supabase
+        .from("manual_payment_entries")
+        .select("id", { count: "exact", head: true })
+        .eq("invoice_id", inv.id)
+        .eq("status", "pending");
+      if (error) throw error;
+      return (count ?? 0) > 0;
+    },
+  });
+  const hasPendingManual = pendingManualQ.data ?? false;
+
   const suggestionsQ = usePaymentSuggestions(inv.id);
 
   const linkedTotal = (linksQ.data || []).reduce((s, l) => s + Number(l.amount_applied), 0);
@@ -159,7 +174,7 @@ export function InvoiceDetailClient({
           <Link href="/invoices" className="text-sm text-muted-foreground hover:underline">← Back to invoices</Link>
           <h1 className="text-xl font-semibold mt-1">
             {inv.invoice_number || inv.id.slice(0, 8)}
-            <span className="ml-3"><StatusBadge status={inv.reconciliation_status} /></span>
+            <span className="ml-3"><StatusBadge status={inv.reconciliation_status} pendingManualPayment={hasPendingManual} /></span>
           </h1>
         </div>
         <div className="flex items-center gap-2">
@@ -282,7 +297,7 @@ export function InvoiceDetailClient({
                   </span>
                 }
               />
-              <Field label="Status" value={<StatusBadge status={inv.reconciliation_status} />} />
+              <Field label="Status" value={<StatusBadge status={inv.reconciliation_status} pendingManualPayment={hasPendingManual} />} />
             </div>
           </div>
         </CardContent>
@@ -299,6 +314,27 @@ export function InvoiceDetailClient({
           qc.invalidateQueries({ queryKey: ["invoices.walkin"] });
         }}
       />
+
+      {/* "Add Payment Manually" and "Mark as Commission / TDS" buttons — stacked, right-aligned */}
+      <div className="flex flex-col items-end gap-0">
+        <AddPaymentManuallyButton invoiceId={inv.id} />
+        {outstanding > 0.0001 &&
+          !(
+            (inv.source?.toLowerCase().includes("walk") ||
+              inv.source?.toLowerCase().includes("by phone"))
+          ) && (
+            <div className="mt-2">
+              <MarkAsCommissionTdsButton
+                invoiceId={inv.id}
+                remainingGap={outstanding}
+                grandTotal={Number(inv.grand_total)}
+                onSuccess={() => {
+                  qc.invalidateQueries({ queryKey: ["manual_entries", inv.id] });
+                }}
+              />
+            </div>
+          )}
+      </div>
 
       {/* Linked payments: shown BEFORE payment panels for reconciled/partial, AFTER for unreconciled */}
       {inv.reconciliation_status !== "unreconciled" && (
@@ -379,6 +415,9 @@ export function InvoiceDetailClient({
           }}
         />
       )}
+
+      {/* Manual Payment Entries list */}
+      <ManualPaymentEntriesSection invoiceId={inv.id} />
 
       <InvoiceAudit invoiceId={inv.id} invoiceNumber={inv.invoice_number} />
     </div>
@@ -560,14 +599,7 @@ function AddPaymentPanel({
 
   const remainingForInvoice = outstanding - pending.reduce((s, l) => s + l.amount_applied, 0);
 
-  // For UPI and Card, bank_transfer rows are also relevant (a UPI/card credit appears
-  // in both the MPR and the bank statement). We therefore include bank_transfer rows
-  // whenever the operator has selected UPI or Card.
-  const methodsForQuery = React.useMemo<string[]>(() => {
-    if (method === "upi") return ["upi", "bank_transfer"];
-    if (method === "card") return ["card", "bank_transfer"];
-    return [method];
-  }, [method]);
+  const methodsForQuery = React.useMemo<string[]>(() => [method], [method]);
 
   // Auto-detect the latest date that has transactions for the PRIMARY method (upi/card),
   // not the combined set — this avoids landing on a bank_transfer-only date.
@@ -605,12 +637,7 @@ function AddPaymentPanel({
         .eq("payment_date", debouncedDate)
         .order("time_text", { ascending: true });
       if (error) throw error;
-      // Sort: primary method rows first, then bank_transfer rows
-      const rows = (data || []) as TransactionRow[];
-      return [
-        ...rows.filter((r) => r.payment_method === method),
-        ...rows.filter((r) => r.payment_method !== method),
-      ];
+      return (data || []) as TransactionRow[];
     },
   });
 
@@ -969,6 +996,621 @@ function AddPaymentPanel({
         <p className="text-sm">{confirmDialog?.message}</p>
       </Dialog>
     </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Add Payment Manually — button + modal
+// ---------------------------------------------------------------------------
+
+type ManualPaymentFormType = "upi" | "another_machine";
+
+function AddPaymentManuallyButton({ invoiceId }: { invoiceId: string }) {
+  const supabase = React.useMemo(() => createClient(), []);
+  const toast = useToast();
+  const qc = useQueryClient();
+  const [open, setOpen] = React.useState(false);
+  const [paymentType, setPaymentType] = React.useState<ManualPaymentFormType>("upi");
+  const [amount, setAmount] = React.useState("");
+  const [transactionDate, setTransactionDate] = React.useState("");
+  const [settlementDate, setSettlementDate] = React.useState("");
+  const [vpa, setVpa] = React.useState("");
+  const [upiTransactionId, setUpiTransactionId] = React.useState("");
+  const [submitting, setSubmitting] = React.useState(false);
+  const [fieldError, setFieldError] = React.useState<string | null>(null);
+  const [infoBanners, setInfoBanners] = React.useState<string[]>([]);
+
+  function resetForm() {
+    setPaymentType("upi");
+    setAmount("");
+    setTransactionDate("");
+    setSettlementDate("");
+    setVpa("");
+    setUpiTransactionId("");
+    setFieldError(null);
+    setInfoBanners([]);
+  }
+
+  function handleClose() {
+    setOpen(false);
+    resetForm();
+  }
+
+  async function handleSubmit() {
+    setFieldError(null);
+
+    // Client-side validation
+    const amt = parseFloat(amount);
+    if (!Number.isFinite(amt) || amt <= 0) {
+      setFieldError("Amount must be greater than zero");
+      return;
+    }
+    if (!transactionDate) {
+      setFieldError("Transaction date is required");
+      return;
+    }
+    if (paymentType === "upi") {
+      if (!settlementDate || !vpa.trim() || !upiTransactionId.trim()) {
+        setFieldError("All UPI fields are required");
+        return;
+      }
+    }
+
+    setSubmitting(true);
+    try {
+      const { data, error } = await supabase.rpc("rpc_submit_manual_payment_entry", {
+        p_invoice_id: invoiceId,
+        p_payment_type: paymentType === "upi" ? "upi" : "another_machine",
+        p_amount: amt,
+        p_transaction_date: transactionDate,
+        p_settlement_date: paymentType === "upi" ? settlementDate : null,
+        p_vpa: paymentType === "upi" ? vpa.trim() : null,
+        p_upi_transaction_id: paymentType === "upi" ? upiTransactionId.trim() : null,
+      });
+
+      if (error) {
+        const msg = error.message || String(error);
+        if (msg.includes("MANUAL_UPI_FIELDS_REQUIRED")) {
+          setFieldError("All UPI fields are required");
+        } else if (msg.includes("MANUAL_UPI_EXCEEDS_BANK_CREDIT")) {
+          setFieldError("Amount would exceed the bank credit for this settlement date");
+        } else if (msg.includes("AMOUNT_MUST_BE_POSITIVE")) {
+          setFieldError("Amount must be greater than zero");
+        } else {
+          setFieldError(prettifyError(msg));
+        }
+        setSubmitting(false);
+        return;
+      }
+
+      // Surface admin_flags as info banners
+      const flags: Array<{ code: string; message?: string }> = (data as any)?.admin_flags ?? [];
+      const banners = flags.map((f) =>
+        f.message ?? (f.code === "NO_BANK_CREDIT_FOUND"
+          ? "No bank credit found for this settlement date"
+          : f.code === "MPR_UNVERIFIED"
+          ? "MPR unverified — this entry could not be matched to the bank statement"
+          : f.code)
+      );
+      setInfoBanners(banners);
+
+      toast.show("success", "Manual payment entry submitted. It will be reviewed by an admin.");
+      qc.invalidateQueries({ queryKey: ["manual_entries", invoiceId] });
+
+      // Keep modal open to show banners if any, otherwise close
+      if (banners.length === 0) {
+        handleClose();
+      } else {
+        setSubmitting(false);
+      }
+    } catch {
+      setFieldError("A network error occurred. Please check your connection and try again.");
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <>
+      <Button variant="outline" onClick={() => setOpen(true)}>
+        Add Payment Manually
+      </Button>
+
+      <Dialog
+        open={open}
+        onClose={handleClose}
+        title="Add Payment Manually"
+        size="md"
+        footer={
+          infoBanners.length > 0 ? (
+            <Button onClick={handleClose}>Close</Button>
+          ) : (
+            <>
+              <Button variant="outline" onClick={handleClose}>Cancel</Button>
+              <Button onClick={handleSubmit} disabled={submitting}>
+                {submitting ? "Submitting…" : "Submit"}
+              </Button>
+            </>
+          )
+        }
+      >
+        <div className="space-y-3 text-sm">
+          {/* Info banners shown after a successful submit with flags */}
+          {infoBanners.length > 0 && (
+            <div className="space-y-2">
+              {infoBanners.map((msg, i) => (
+                <div key={i} className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
+                  {msg}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {fieldError && (
+            <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900">
+              {fieldError}
+            </div>
+          )}
+
+          {/* Payment type selector */}
+          <div>
+            <Label>Payment Type</Label>
+            <div className="mt-1.5 flex gap-4">
+              {(["upi", "another_machine"] as ManualPaymentFormType[]).map((t) => (
+                <label key={t} className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="manual_payment_type"
+                    value={t}
+                    checked={paymentType === t}
+                    onChange={() => { setPaymentType(t); setFieldError(null); }}
+                    className="accent-primary"
+                  />
+                  <span>{t === "upi" ? "UPI Transaction" : "Received in Another Machine"}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          {/* Amount */}
+          <div>
+            <Label>Amount (₹)</Label>
+            <Input
+              type="number"
+              min="0"
+              step="0.01"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              placeholder="0.00"
+            />
+          </div>
+
+          {/* Transaction Date */}
+          <div>
+            <Label>Transaction Date</Label>
+            <Input
+              type="date"
+              value={transactionDate}
+              onChange={(e) => setTransactionDate(e.target.value)}
+            />
+          </div>
+
+          {/* UPI-only fields */}
+          {paymentType === "upi" && (
+            <>
+              <div>
+                <Label>Settlement Date</Label>
+                <Input
+                  type="date"
+                  value={settlementDate}
+                  onChange={(e) => setSettlementDate(e.target.value)}
+                />
+              </div>
+              <div>
+                <Label>VPA</Label>
+                <Input
+                  type="text"
+                  value={vpa}
+                  onChange={(e) => setVpa(e.target.value)}
+                  placeholder="e.g. user@upi"
+                />
+              </div>
+              <div>
+                <Label>UPI Transaction ID</Label>
+                <Input
+                  type="text"
+                  value={upiTransactionId}
+                  onChange={(e) => setUpiTransactionId(e.target.value)}
+                  placeholder="Transaction reference number"
+                />
+              </div>
+            </>
+          )}
+        </div>
+      </Dialog>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Manual Payment Entries — list section
+// ---------------------------------------------------------------------------
+
+function ManualPaymentEntriesSection({ invoiceId }: { invoiceId: string }) {
+  const supabase = React.useMemo(() => createClient(), []);
+
+  const q = useQuery({
+    queryKey: ["manual_entries", invoiceId],
+    queryFn: async () => {
+      const { data, error } = await supabase.rpc("rpc_get_manual_payment_entries", {
+        p_invoice_id: invoiceId,
+      });
+      if (error) throw error;
+      return ((data as any)?.entries ?? []) as ManualPaymentEntry[];
+    },
+  });
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Manual Payment Entries</CardTitle>
+      </CardHeader>
+      <CardContent className="p-0">
+        {q.isLoading ? (
+          // Loading skeleton
+          <div className="space-y-2 p-4">
+            {[1, 2].map((i) => (
+              <div key={i} className="h-12 animate-pulse rounded-md bg-muted/50" />
+            ))}
+          </div>
+        ) : q.isError ? (
+          // Error state
+          <div className="p-4">
+            <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900">
+              Could not load manual payment entries. Please refresh the page to try again.
+            </div>
+          </div>
+        ) : (q.data ?? []).length === 0 ? (
+          // Empty state
+          <div className="p-4 text-sm text-muted-foreground">
+            No manual entries yet.
+          </div>
+        ) : (
+          // Entries list
+          <div className="divide-y">
+            {(q.data ?? []).map((entry) => (
+              <ManualEntryRow key={entry.id} entry={entry} />
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// Type badge colour map — UPI=blue, Another Machine=slate, Commission=orange, TDS=purple
+const TYPE_BADGE_CLASS: Record<ManualPaymentType, string> = {
+  upi: "bg-blue-100 text-blue-800",
+  another_machine: "bg-slate-100 text-slate-600",
+  commission: "bg-orange-100 text-orange-800",
+  tds: "bg-purple-100 text-purple-700",
+};
+
+function ManualEntryRow({ entry }: { entry: ManualPaymentEntry }) {
+  const typeLabel: Record<ManualPaymentType, string> = {
+    upi: "UPI",
+    another_machine: "Another Machine",
+    commission: "Commission",
+    tds: "TDS",
+  };
+
+  const statusConfig: Record<
+    string,
+    { label: string; variant: "warning" | "success" | "default" }
+  > = {
+    pending: { label: "Pending", variant: "warning" },
+    approved: { label: "Approved", variant: "success" },
+    rejected: { label: "Rejected", variant: "default" },
+  };
+
+  const sc = statusConfig[entry.status] ?? { label: entry.status, variant: "default" };
+
+  return (
+    <div className="px-4 py-3 space-y-2 text-sm">
+      <div className="flex flex-wrap items-start gap-2">
+        {/* Type badge */}
+        <Badge className={TYPE_BADGE_CLASS[entry.payment_type]}>
+          {typeLabel[entry.payment_type] ?? entry.payment_type}
+        </Badge>
+
+        {/* Status badge */}
+        <Badge variant={sc.variant}>{sc.label}</Badge>
+
+        {/* Amount */}
+        <span className="font-semibold tabular-nums">{formatINR(entry.amount)}</span>
+
+        {/* Transaction date */}
+        <span className="text-muted-foreground">{formatDate(entry.transaction_date)}</span>
+
+        {/* Party name for commission / TDS */}
+        {(entry.payment_type === "commission" || entry.payment_type === "tds") &&
+          entry.party_name && (
+            <span className="text-muted-foreground">— {entry.party_name}</span>
+          )}
+
+        {/* Submitted by */}
+        {entry.submitter_email && (
+          <span className="text-muted-foreground">by {entry.submitter_email}</span>
+        )}
+
+        {/* Reviewed at (approved) */}
+        {entry.status === "approved" && entry.reviewed_at && (
+          <span className="text-green-700">Approved {formatDateTime(entry.reviewed_at)}</span>
+        )}
+      </div>
+
+      {/* Note (commission / TDS) */}
+      {(entry.payment_type === "commission" || entry.payment_type === "tds") &&
+        entry.note && (
+          <div className="rounded-md border border-slate-100 bg-slate-50 px-3 py-1.5 text-xs text-slate-700">
+            Note: {entry.note}
+          </div>
+        )}
+
+      {/* Rejection reason */}
+      {entry.status === "rejected" && entry.rejection_reason && (
+        <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs text-slate-700">
+          Rejection reason: {entry.rejection_reason}
+        </div>
+      )}
+
+      {/* Admin flags */}
+      {Array.isArray(entry.admin_flags) && entry.admin_flags.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {entry.admin_flags.map((flag, i) => {
+            const label =
+              flag.code === "NO_BANK_CREDIT_FOUND"
+                ? "No bank credit"
+                : flag.code === "MPR_UNVERIFIED"
+                ? "MPR unverified"
+                : String(flag.code);
+            return (
+              <span
+                key={i}
+                className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs text-amber-700"
+              >
+                {label}
+              </span>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Mark as Commission / TDS — button + modal (CDW-4)
+// ---------------------------------------------------------------------------
+
+type CommissionTdsType = "commission" | "tds";
+
+const COMMISSION_PARTIES = ["MMT / Goibibo", "Agoda", "Yatra", "AsiaTech", "Others"] as const;
+type CommissionParty = (typeof COMMISSION_PARTIES)[number];
+
+function MarkAsCommissionTdsButton({
+  invoiceId,
+  remainingGap,
+  onSuccess,
+}: {
+  invoiceId: string;
+  remainingGap: number;
+  grandTotal: number;
+  onSuccess: () => void;
+}) {
+  const supabase = React.useMemo(() => createClient(), []);
+  const toast = useToast();
+
+  const [open, setOpen] = React.useState(false);
+  const [type, setType] = React.useState<CommissionTdsType>("commission");
+  const [party, setParty] = React.useState<CommissionParty>("MMT / Goibibo");
+  const [otherParty, setOtherParty] = React.useState("");
+  const [amount, setAmount] = React.useState(remainingGap.toFixed(2));
+  const [note, setNote] = React.useState("");
+  const [submitting, setSubmitting] = React.useState(false);
+  const [fieldError, setFieldError] = React.useState<string | null>(null);
+
+  // Keep the amount pre-filled when remainingGap changes (e.g. after another entry is submitted)
+  React.useEffect(() => {
+    if (!open) {
+      setAmount(remainingGap.toFixed(2));
+    }
+  }, [remainingGap, open]);
+
+  function resetForm() {
+    setType("commission");
+    setParty("MMT / Goibibo");
+    setOtherParty("");
+    setAmount(remainingGap.toFixed(2));
+    setNote("");
+    setFieldError(null);
+  }
+
+  function handleClose() {
+    setOpen(false);
+    resetForm();
+  }
+
+  async function handleSubmit() {
+    setFieldError(null);
+
+    // Client-side validation
+    const amt = parseFloat(amount);
+    if (!Number.isFinite(amt) || amt <= 0) {
+      setFieldError("Amount must be greater than zero");
+      return;
+    }
+    if (amt > remainingGap + 0.001) {
+      setFieldError("Amount exceeds the remaining gap");
+      return;
+    }
+    if (party === "Others" && !otherParty.trim()) {
+      setFieldError("Please enter the party name");
+      return;
+    }
+
+    const resolvedParty =
+      party === "Others" ? `Others: ${otherParty.trim()}` : party;
+
+    setSubmitting(true);
+    try {
+      const { error } = await supabase.rpc("rpc_submit_manual_payment_entry", {
+        p_invoice_id: invoiceId,
+        p_payment_type: type,
+        p_amount: amt,
+        p_transaction_date: new Date().toISOString().slice(0, 10),
+        p_party_name: resolvedParty,
+        p_note: note.trim() || null,
+      });
+
+      if (error) {
+        const msg = error.message || String(error);
+        if (msg.includes("WRITEOFF_EXCEEDS_GAP")) {
+          setFieldError("Amount exceeds the remaining gap");
+        } else if (msg.includes("PARTY_REQUIRED")) {
+          setFieldError("Please select a party");
+        } else if (msg.includes("WRITEOFF_SOURCE_NOT_ELIGIBLE")) {
+          setFieldError(
+            "Commission write-offs are not available for walk-in or phone bookings"
+          );
+        } else {
+          setFieldError(prettifyError(msg));
+        }
+        setSubmitting(false);
+        return;
+      }
+
+      toast.show(
+        "success",
+        `${type === "commission" ? "Commission" : "TDS"} entry submitted. It will be reviewed by an admin.`
+      );
+      onSuccess();
+      handleClose();
+    } catch {
+      setFieldError("A network error occurred. Please check your connection and try again.");
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <>
+      <Button variant="outline" className="text-muted-foreground" onClick={() => setOpen(true)}>
+        Mark as Commission / TDS
+      </Button>
+
+      <Dialog
+        open={open}
+        onClose={handleClose}
+        title="Mark as Commission / TDS"
+        size="md"
+        footer={
+          <>
+            <Button variant="outline" onClick={handleClose}>
+              Cancel
+            </Button>
+            <Button onClick={handleSubmit} disabled={submitting}>
+              {submitting ? "Submitting…" : "Submit"}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-3 text-sm">
+          {fieldError && (
+            <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900">
+              {fieldError}
+            </div>
+          )}
+
+          {/* Type */}
+          <div>
+            <Label>Type</Label>
+            <div className="mt-1.5 flex gap-4">
+              {(["commission", "tds"] as CommissionTdsType[]).map((t) => (
+                <label key={t} className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="commission_tds_type"
+                    value={t}
+                    checked={type === t}
+                    onChange={() => { setType(t); setFieldError(null); }}
+                    className="accent-primary"
+                  />
+                  <span>{t === "commission" ? "Commission" : "TDS"}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          {/* Party */}
+          <div>
+            <Label>Party</Label>
+            <select
+              value={party}
+              onChange={(e) => {
+                setParty(e.target.value as CommissionParty);
+                setFieldError(null);
+              }}
+              className="mt-1 block w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
+            >
+              {COMMISSION_PARTIES.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Free-text party name when "Others" is selected */}
+          {party === "Others" && (
+            <div>
+              <Label>Party name</Label>
+              <Input
+                type="text"
+                value={otherParty}
+                onChange={(e) => setOtherParty(e.target.value)}
+                placeholder="Enter party name"
+              />
+            </div>
+          )}
+
+          {/* Amount */}
+          <div>
+            <Label>Amount (₹)</Label>
+            <Input
+              type="number"
+              min="0.01"
+              step="0.01"
+              max={remainingGap}
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              placeholder="0.00"
+            />
+            <p className="mt-1 text-xs text-muted-foreground">
+              Remaining gap: {formatINR(remainingGap)}
+            </p>
+          </div>
+
+          {/* Note (optional) */}
+          <div>
+            <Label>Note (optional)</Label>
+            <Textarea
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="Any additional context for the admin"
+            />
+          </div>
+        </div>
+      </Dialog>
+    </>
   );
 }
 

@@ -26,6 +26,8 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     { href: "/admin/approvals", label: "Approvals" },
     { href: "/admin/discrepancies", label: "Discrepancies" },
     { href: "/admin/mis", label: "MIS Report" },
+    { href: "/admin/manual-payments", label: "Manual Payments" },
+    { href: "/reports/deductions", label: "Deductions" },
     { href: "/audit", label: "Audit Log" },
     { href: "/admin/issues", label: "Issues" },
     { href: "/admin/settings/payment-sources", label: "Settings" },
@@ -35,6 +37,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     { href: "/invoices", label: "Invoices" },
     { href: "/bank-statement", label: "Bank Statement" },
     { href: "/payment-folio", label: "Payment Folio" },
+    { href: "/reports/deductions", label: "Deductions" },
     { href: "/audit", label: "Audit Log" },
   ];
   const links = isAdmin ? adminLinks : operatorLinks;
