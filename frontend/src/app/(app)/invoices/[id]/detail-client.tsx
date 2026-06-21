@@ -319,10 +319,7 @@ export function InvoiceDetailClient({
       <div className="flex flex-col items-end gap-0">
         <AddPaymentManuallyButton invoiceId={inv.id} />
         {outstanding > 0.0001 &&
-          !(
-            (inv.source?.toLowerCase().includes("walk") ||
-              inv.source?.toLowerCase().includes("by phone"))
-          ) && (
+          !inv.source?.toLowerCase().includes("walk") && (
             <div className="mt-2">
               <MarkAsCommissionTdsButton
                 invoiceId={inv.id}
