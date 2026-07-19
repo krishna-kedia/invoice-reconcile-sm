@@ -1,197 +1,186 @@
 # Designer Context
-<!-- Last updated: 2026-05-19 09:00 -->
+<!-- Last updated: 2026-07-18 12:00 -->
 
-## Last Activity
-N/A — Designer not yet invoked for any built work.
+## Design System
 
-## Inbound Task — BS-Polish-1 (Bank Statement Visual Polish Spec)
-- Issued by PM: 2026-05-19 09:00
-- Repo (cwd): `/Users/krishnagopalkedia/Documents/GitHub/invoice-reconcile-frontend`
-- Files to read first:
-  - `frontend/src/app/(app)/layout.tsx`
-  - `frontend/src/app/(app)/bank-statement/bank-statement-client.tsx`
-  - `frontend/src/app/globals.css` (theme tokens)
-  - `frontend/src/components/ui/{table,badge,button,input,label,card}.tsx` (existing primitives)
-- Scope (all 6 points are LOCKED by the user — do NOT debate them, only specify the visual treatment):
-  1. **Full-width** — `(app)/layout.tsx` currently wraps header inner and main in `max-w-7xl mx-auto`. Both wrappers go full-width. Specify exact replacement classes (suggest `w-full px-6` on both, or `px-8` on wide screens — your call, but the header and main must visually align). Sidebar `w-52` stays.
-  2. **Filter controls** on `/bank-statement` — current Method and Drill-down filters are a row of small `<button>` "pills" (multi-select toggles). The user wants them to look polished and consistent with the date/text/amount inputs in the same Filters card. Pick ONE treatment:
-     - (A) Refined chip row — same multi-select buttons but better sizing/spacing/active state/focus ring; align baseline with the inputs.
-     - (B) Popover trigger button labelled like "Method (2 selected) ▾" that opens a checkbox list.
-     Justify your choice in one sentence. Provide exact Tailwind classes.
-  3. **Row tints** for the bank-statement table. Tint is computed per `bank_id` from the sum of `amount_applied` across all its split rows:
-     - sum === 0 → no tint (default)
-     - |sum − deposit_amt| < 1 → pastel green (fully applied)
-     - 0 < sum < deposit_amt → pastel yellow (partial)
-     Constraints:
-     - Must compose with the existing `<TR>` hover (`hover:bg-muted/30`).
-     - All splits of one `bank_id` get the same tint.
-     - Subtle enough to not fight the method badge palette (UPI=blue, Card=purple, Bank=slate, Cash=green, MMT=orange).
-     - Spec a working hover variant so hover still gives feedback over a tinted row.
-     - Suggested starting points: `bg-green-50 hover:bg-green-100` and `bg-amber-50 hover:bg-amber-100`. Adjust if you have a better recommendation given the theme; either way commit to one.
-  4. **Clickable rows** — when `canExpand === true` (`split_index === 1 && drill_type !== null`), the entire row toggles expand on click. Spec:
-     - `cursor-pointer` on the `<TR>`.
-     - Hover bg that works WITH the tint (probably the same hover variants from point 3).
-     - Focus ring (rows should be keyboard-focusable; consider `tabIndex={0}` + `focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset`).
-     - Invoice `<Link>` keeps its current style but receives `onClick={(e) => e.stopPropagation()}`.
-     - Chevron remains visible as a hint — spec whether it stays its own button (recommended) or just an icon span.
-  5. **Drop amber left-border** on unreconciled rows (`isUnreconciled && !isSplit`). Confirm in spec; no replacement.
-  6. **Split-row coherence** — implementation-side concern but designer should confirm tint applies to ALL splits of a bank_id identically.
+### Colors
 
-- Output: replace the section below titled "BS-Polish Spec (2026-05-19)" with your actual spec. Include literal class strings the frontend can paste. End with a one-line "READY FOR FRONTEND-DEV" line.
+**Status badges (ManualPaymentEntry.status):**
+- `pending` → `variant="warning"` → `bg-amber-100 text-amber-900`
+- `approved` → `variant="success"` → `bg-green-100 text-green-800`
+- `rejected` → `variant="default"` → `bg-secondary text-secondary-foreground` (grey/slate)
+
+**Type badges (ManualPaymentEntry.payment_type):**
+- `upi` → `bg-blue-100 text-blue-800`
+- `another_machine` → `bg-slate-100 text-slate-600`
+- `commission` → `bg-orange-100 text-orange-800`
+- `tds` → `bg-purple-100 text-purple-700`
+
+**Warning / admin flag chips:**
+- `inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs text-amber-700`
+- Note: `rounded-full` (pill shape), no `font-medium` weight, softer `text-amber-700`
+
+**Summary card tints:**
+- Commission card: `bg-orange-50` on `<Card>`
+- TDS card: `bg-purple-50` on `<Card>`
+
+**Existing badge variants (badge.tsx):**
+- `default`: `bg-secondary text-secondary-foreground`
+- `outline`: `border border-border text-foreground`
+- `destructive`: `bg-red-100 text-red-800`
+- `success`: `bg-green-100 text-green-800`
+- `warning`: `bg-amber-100 text-amber-900`
+- `info`: `bg-purple-100 text-purple-800`
+
+### Typography
+- Page heading: `text-xl font-semibold`
+- Card titles: `CardTitle` component (inherited)
+- Table cells: `text-xs` for muted context, `text-sm` for primary content
+- Labels: `Label` component
+
+### Spacing
+- Modal field gap: `space-y-3` (previously `space-y-4` — changed for tighter modal rhythm)
+- Card internal padding: `p-4` or `CardContent` default
+- Between stacked buttons: `mt-2` on second button wrapper
+
+### Component Patterns
+
+**Stacked action buttons (invoice detail):**
+- Both "Add Payment Manually" and "Mark as Commission / TDS" are wrapped in a single `<div className="flex flex-col items-end gap-0">` 
+- "Add Payment Manually": `<Button variant="outline">`
+- "Mark as Commission / TDS": `<Button variant="outline" className="text-muted-foreground">` inside `<div className="mt-2">`
+- The muted foreground colour on the second button visually subordinates it without hiding it
+
+**Admin queue table rows:**
+- Pending rows: `<TR className="border-l-2 border-amber-400">` — the amber left border signals "needs action"
+- Approved/Rejected rows: no extra class
+- Approve button: `<Button size="sm">` (default/primary variant)
+- Reject button: `<Button size="sm" variant="outline" className="text-red-700 border-red-200 hover:bg-red-50">`
+- Inline approve error: `text-xs text-red-600 mt-1`
+
+**Type badge pattern:**
+- Do NOT use `variant="outline"` for type badges — type must be visually distinct per category
+- Use `<Badge className={TYPE_BADGE_CLASS[type]}>` with the colour map above
+- The colour map lives as a module-level const so it can be reused
+
+**Warning flag chips:**
+- Use `<span>` not `<Badge>` — Badge has `rounded-md`; chips need `rounded-full` for the pill shape
+- Class: `inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs text-amber-700`
+
+**Modal layout rhythm:**
+- `space-y-3` between fields (not `space-y-4`)
+- Add Payment Manually: Type → Amount → Transaction Date → (UPI fields: Settlement Date, VPA, UPI Txn ID)
+- Mark as Commission/TDS: Type → Party → (Other party input, conditional) → Amount → Note
+
+## What I've Styled
+
+### [2026-06-20 19:00] MPE-6 + CDW-6: Polish pass on manual payment UI
+**Files changed:**
+- `frontend/src/app/(app)/invoices/[id]/detail-client.tsx`
+- `frontend/src/app/(app)/admin/manual-payments/page.tsx`
+- `frontend/src/app/(app)/reports/deductions/page.tsx`
+
+**What was styled:**
+
+`detail-client.tsx`:
+- Wrapped "Add Payment Manually" and "Mark as Commission/TDS" buttons in a single `flex flex-col items-end` container; second button has `mt-2` and `text-muted-foreground` to visually subordinate it
+- Added `TYPE_BADGE_CLASS` const mapping all four payment types to distinct colour classes
+- `ManualEntryRow` type badge changed from `variant="outline"` (neutral) to coloured `className` overrides
+- Admin flag chips: changed from `<Badge variant="warning">` to `<span>` with `rounded-full border-amber-200 bg-amber-50 text-amber-700` (pill shape, softer colour)
+- Both modal `space-y-4` → `space-y-3` for tighter field rhythm
+
+`manual-payments/page.tsx`:
+- Added `PAYMENT_TYPE_CLASS` const with same colour map
+- Pending `<TR>` rows get `border-l-2 border-amber-400` left accent
+- Type badge in table changed from `variant="outline"` to coloured `className`
+- `FlagChips` component: replaced `<Badge variant="warning">` with amber pill `<span>`
+- Inline approve error: `text-red-700` → `text-red-600 mt-1`
+
+`reports/deductions/page.tsx`:
+- `TypeBadge`: Commission changed from `variant="info"` (purple) to `bg-orange-100 text-orange-800`; TDS changed from `variant="warning"` (amber) to `bg-purple-100 text-purple-700`
+- Commission summary card: `<Card className="bg-orange-50">`
+- TDS summary card: `<Card className="bg-purple-50">`
+
+### [2026-05-19 09:00] BS-Polish-1 (Bank Statement Visual Polish Spec)
+- Output spec only (no file edits) — see spec in the section below
+- Confirmed layout is already full-width
+- Specced filter chip classes, row tints, clickable row focus ring, left-border removal, split-row tint fix
+
+### [2026-07-18 12:00] MRR-3: Polish pass on reconciliation report pages
+**Files changed:**
+- `frontend/src/app/(app)/reports/reconciliation/reconciliation-summary-client.tsx`
+- `frontend/src/app/(app)/reports/reconciliation/[month]/reconciliation-detail-client.tsx`
+
+**What was styled:**
+
+`reconciliation-summary-client.tsx`:
+- `showOrDash()` now returns `<span className="text-muted-foreground">—</span>` for zero values instead of a plain string, so em dashes are visually muted across all zero cells
+- Added `outstandingClass()` helper: negative = `text-green-700 dark:text-green-400`, zero = `text-muted-foreground`, positive = no class (default text)
+- Data row "Total Received" and "Total Deductions" cells: `font-medium` → `font-semibold` to visually signal they are subtotals
+- Totals row: `bg-gray-50 dark:bg-gray-800` → `bg-muted/40 border-t` to use design system tokens and add a visual separator
+
+`reconciliation-detail-client.tsx`:
+- `SummaryCard` value: `font-semibold` → `font-bold` (matches task spec)
+- Summary cards grid: `md:grid-cols-4` → `lg:grid-cols-4` on both loading and success states
+- Outstanding card: value wrapped in `<span>` with amber (> 0) or green (≤ 0) conditional color
+- Added `SkeletonRows` component matching actual column counts (8 cols for booking type, 3 for payment timing)
+- Loading skeleton card content: replaced blob divs with `p-0` CardContent + proper `<table><TBody><SkeletonRows /></TBody></table>` structure
+- Pending row in payment timing: moved text color from per-cell to TR level (`text-amber-700 dark:text-amber-400`), fixed dark class from `dark:bg-amber-900/20` → `dark:bg-amber-950/20`
+
+## Pending / In Progress
+- None
+
+## Decisions Log
+
+### [2026-06-20] MPE-6: `rounded-full` for flag chips, not `rounded-md`
+- `Badge` uses `rounded-md` by design (square-ish pill for labels)
+- Warning flags are a different semantic element — shorter, contextual alerts that read better as full pills
+- Using `<span>` directly avoids fighting Badge's border radius
+
+### [2026-06-20] MPE-6: `text-muted-foreground` on "Mark as Commission/TDS" button
+- Both buttons are `variant="outline"` — they would look identical without differentiation
+- "Mark as Commission/TDS" is a less-common action than "Add Payment Manually"; muted text signals secondary priority without hiding the button
+- Hotel staff on OTA invoices with a gap will see both; the muted colour guides them toward the primary action first
+
+### [2026-06-20] MPE-6: Commission=orange, TDS=purple (type badge palette)
+- Commission is an OTA deduction (a cost borne by the hotel) — orange signals "expense/deduction" without red (which is reserved for errors)
+- TDS is a tax withholding — purple is already the `info` variant, appropriate for regulatory/informational entries
+- UPI=blue (informational, digital) and Another Machine=slate (neutral, physical) follow existing badge palette logic
+
+### [2026-06-20] MPE-6: `space-y-3` in modals instead of `space-y-4`
+- Both modals have 4-6 fields; `space-y-4` pushes them far enough apart that the modal grows tall on mobile
+- `space-y-3` (12px) is sufficient for label-input pairs with 16px labels; the visual separation remains clear
+
+### [2026-05-19] BS-Polish-1 Spec decisions
+- Chose chip row treatment (A) over popover — multi-select is immediately legible from visual state
+- Confirmed layout is already full-width — no code change needed
+- Tints: `bg-green-50 hover:bg-green-100` (fully applied), `bg-amber-50 hover:bg-amber-100` (partial)
+- Amber left-border on unreconciled rows dropped (no replacement — absence of tint is sufficient signal)
+
+## Notes for Product Manager
+
+- MPE-6: The `TYPE_BADGE_CLASS` and `PAYMENT_TYPE_CLASS` consts are duplicated across `detail-client.tsx` and `manual-payments/page.tsx`. If a third screen needs type badges, extract them to a shared helper in `src/components/ui/badge.tsx` or `src/lib/payment-type.ts`.
+- MPE-6: The "Mark as Commission/TDS" button is now visually subordinated (muted text) to "Add Payment Manually". If user testing shows operators miss it, remove `text-muted-foreground` — the button is still fully visible and functional.
+- CDW-6: The `TypeBadge` in the deductions report now correctly shows Commission=orange and TDS=purple. The previous `variant="info"` (purple) for Commission was incorrect — it made Commission and TDS look identical in colour, which is confusing in a report that compares both.
 
 ## BS-Polish Spec (2026-05-19)
 
 ### 1. Full-width container (`layout.tsx`)
+No structural change needed — layout already full-width.
 
-**Current state found:** The layout does NOT use `max-w-7xl` anywhere. The header inner `<div>` already has `px-6 py-3` with no max-width constraint. The body row already has `px-6 py-6` with no max-width constraint. The sidebar is `w-52 shrink-0` and main is `flex-1 min-w-0`. The layout is already effectively full-width.
+### 2. Filter control treatment
+Chose (A) refined chip row. Inactive chip: `rounded-md border border-input bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2`. Active chip: `rounded-md border border-primary bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2`.
 
-**Required change:** No structural change needed. The existing classes are correct as-is:
-- Header inner div: `flex items-center justify-between px-6 py-3` — keep exactly.
-- Body row div: `flex gap-6 px-6 py-6` — keep exactly.
-- Sidebar: `w-52 shrink-0` — keep.
-- Main: `flex-1 min-w-0` — keep.
-
-No code change required for item 1.
-
----
-
-### 2. Filter control treatment (`bank-statement-client.tsx`)
-
-**Current state found:** Method and Drill-down filters are `<button>` elements with `rounded-md border px-2 py-1 text-xs font-medium transition`. Active state: `border-primary bg-primary text-primary-foreground`. Inactive: `border-border hover:bg-muted`. They are sized smaller than the inputs (which are `h-10`) and sit on a separate row below the 7-column text/date/amount grid.
-
-**Chosen treatment: (A) Refined chip row.**
-
-Rationale: The multi-select behaviour is immediately understandable from visual state — a popover adds an interaction layer that slows down frequent-use filters for hotel staff scanning dozens of rows.
-
-**Exact class strings:**
-
-Inactive chip:
-```
-rounded-md border border-input bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2
-```
-
-Active chip:
-```
-rounded-md border border-primary bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2
-```
-
-Notes:
-- `border-input` on inactive chips matches the Input component's border, unifying the Filters card visually.
-- `px-3 py-1.5` (vs the current `px-2 py-1`) gives a more comfortable tap/click target and aligns chip height closer to `h-10` inputs when label text wraps.
-- `bg-background` on inactive chips gives a clean white surface matching the Input background.
-- `hover:bg-accent hover:text-accent-foreground` mirrors the outline Button hover.
-- Focus ring matches Input and Button exactly (`focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2`).
-- The wrapping `<div>` with `mt-1 flex flex-wrap gap-1.5` stays unchanged — gap-1.5 is correct.
-
----
-
-### 3. Row tints (per `bank_id` group)
-
-**Current state found:** `rowColorClass()` already exists and returns tint classes, but it operates on individual row data, not on a pre-computed per-`bank_id` sum. Split rows (`split_index > 1`) return `""` unconditionally, meaning they get no tint. This is the bug the spec addresses.
-
-**Confirmed tint classes:**
-
-Green tint (fully applied, `|sum − deposit_amt| < 1`):
-- Base: `bg-green-50`
-- Hover: `hover:bg-green-100`
-- Full class string on `<TR>`: `bg-green-50 hover:bg-green-100`
-
-Yellow tint (partial, `0 < sum < deposit_amt`):
-- Base: `bg-amber-50`
-- Hover: `hover:bg-amber-100`
-- Full class string on `<TR>`: `bg-amber-50 hover:bg-amber-100`
-
-No tint (unreconciled, `sum === 0`): no class added — the default `hover:bg-muted/30` from `TR` in `table.tsx` applies.
-
-**Composition with existing TR hover:** The `TR` component in `table.tsx` has `hover:bg-muted/30` as a base class. When we add `hover:bg-green-100` or `hover:bg-amber-100` via `cn()`, Tailwind Merge will resolve the conflict in favour of the last class — the tinted hover wins. This is the correct behaviour. Confirm with the frontend dev that `cn` (which uses `twMerge`) is used to merge these classes; it is — `rowColorClass` result is passed to `cn(borderCls, colorCls, ...)`.
-
-**Badge palette compatibility check:**
-- `bg-green-50` row tint vs `bg-green-100 text-green-800` Cash badge: the badge is darker and saturated; the row is near-white. No conflict — the badge reads clearly.
-- `bg-amber-50` row tint vs `bg-blue-100` (UPI), `bg-purple-100` (Card), `bg-orange-100` (MMT), `bg-slate-100` (Bank): all badge backgrounds are 100-level on their respective hues; `bg-amber-50` row is 50-level — subtle enough that badge colours dominate. No conflict.
-
----
+### 3. Row tints
+Green (fully applied): `bg-green-50 hover:bg-green-100`. Amber (partial): `bg-amber-50 hover:bg-amber-100`. Unreconciled: no class.
 
 ### 4. Clickable rows
-
-**Current state found:** `canExpand` rows already have `cursor-pointer` and an `onClick` on `<TR>`. The invoice `<Link>` already has `onClick={(e) => e.stopPropagation()}`. The chevron is already a `<span>` with `aria-hidden="true"`, not a `<button>`. However, `tabIndex` and a focus ring are absent from the `<TR>`.
-
-**Spec for `<TR>` when `canExpand === true`:**
-
-```
-className={cn(
-  colorCls,           // tint + hover tint from item 3
-  "cursor-pointer",
-  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
-)}
-tabIndex={0}
-onKeyDown={(e) => {
-  if (e.key === "Enter" || e.key === " ") {
-    e.preventDefault();
-    setExpanded((s) => ({ ...s, [r.bank_id]: !s[r.bank_id] }));
-  }
-}}
-```
-
-- `tabIndex={0}` makes the row keyboard-focusable.
-- `focus-visible:ring-inset` keeps the ring inside the row border, preventing layout shift on a table row (which cannot have `ring-offset` without artifacts).
-- `onKeyDown` for Enter and Space is required for keyboard accessibility alongside `tabIndex`.
-- The amber left-border (`borderCls`) is removed (see item 5), so `borderCls` disappears from the `cn()` call.
-- The chevron `<span>` stays as `aria-hidden="true"` — it is a visual hint only. The `<TR>`'s `onClick` handles expand/collapse. The chevron gets no `onClick` of its own (the earlier "chevron is its own button" was reconsidered — it was already changed to a span in the current code, which is correct; keep it).
-- The invoice `<Link>` already has `onClick={(e) => e.stopPropagation()}` — keep it exactly.
-
----
+`tabIndex={0}` + `focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset` + `onKeyDown` for Enter/Space.
 
 ### 5. Drop amber left-border
-
-**Current state found:** The `borderCls` variable is:
-```js
-const borderCls = isUnreconciled && !isSplit ? "border-l-2 border-gray-700" : "";
-```
-This produces a dark gray (not amber — the code uses `border-gray-700`) left border on unreconciled non-split rows. This is confirmed present in the current implementation.
-
-**Spec:** Remove `borderCls` entirely. Delete the variable declaration and remove it from the `cn()` call on `<TR>`. No replacement class. Unreconciled rows are distinguished solely by the absence of a green or amber tint (they will have no tint and the default `hover:bg-muted/30` hover).
-
----
+Remove `borderCls` entirely. No replacement.
 
 ### 6. Split-row tint coherence
-
-**Current state found:** `rowColorClass()` checks `if (r.split_index > 1) return ""` — split rows get no tint at all today. The tint class is computed per-row from `r.total_amount_applied`, which is the sum across all splits (it is the same value on every row of the same `bank_id` group, per the view definition). The bug is only in the `split_index > 1` guard that suppresses it.
-
-**Confirmed spec:** The tint must be computed once per `bank_id` using `total_amount_applied` (which the view already provides consistently across all splits of a `bank_id`), then applied to every row in that group including split rows (`split_index > 1`). The fix is to remove the `if (r.split_index > 1) return ""` guard in `rowColorClass()`. All rows sharing a `bank_id` will then receive the same tint class because they share the same `total_amount_applied` and `deposit_amt` values.
-
-The updated `rowColorClass` logic:
-```ts
-function rowColorClass(r: BankStatementRow): string {
-  const applied = r.total_amount_applied ?? 0;
-  if (applied <= 0) return "";
-  if (Math.abs(applied - r.deposit_amt) < 1) return "bg-green-50 hover:bg-green-100";
-  if (applied > 0 && applied < r.deposit_amt) return "bg-amber-50 hover:bg-amber-100";
-  return "";
-}
-```
-
-Note: the `|sum − deposit_amt| < 1` threshold (not `>=`) is used for "fully applied" to handle floating-point rounding in INR amounts.
-
----
+Remove `if (r.split_index > 1) return ""` guard from `rowColorClass()`.
 
 READY FOR FRONTEND-DEV
-
-## Up Next After BS-Polish (E10 — pre-existing)
-Walk every page and every error state in the frontend. Confirm style-guide compliance per `prd.md` § UI Requirements:
-- Spacing rhythm: 4/8/16/24 grid; cards use 16px internal padding.
-- Status badge palette already in place: `unreconciled`=red, `partial`=amber, `fully_reconciled`=green, `flagged_for_review`=purple (see `src/components/ui/badge.tsx`).
-- Error messages must state what happened, why, and what to do next.
-- Focus rings: tailwind primitives already include `focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2`.
-
-## Theme tokens (set in `frontend/src/app/globals.css`)
-- slate-base palette (HSL CSS variables)
-- `--radius: 0.5rem`
-- Colors all driven by Tailwind tokens (no hex anywhere except the badge accents)
-
-## Files where UI lives
-- `src/app/(app)/...` — pages
-- `src/components/ui/...` — primitives
-- `src/lib/utils.ts` — `cn` (twMerge + clsx) + INR/date formatters
-
-## Status
-awaiting BS-Polish-1 invocation.

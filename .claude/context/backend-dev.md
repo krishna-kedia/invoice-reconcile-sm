@@ -1,6 +1,167 @@
 # Backend Dev Context
-<!-- Last updated: 2026-05-23 (PF-2 dispatched) -->
-<!-- Previous: 2026-05-17 -->
+<!-- Last updated: 2026-06-20 (BUG-001 fix_classify_invoice_source_fallthrough) -->
+<!-- Previous: 2026-06-20 (DUP-2 applied) -->
+
+## [2026-06-20] BUG-001 — Fix fn_classify_invoice_source fallthrough — COMPLETED
+
+### What was built
+Migration `fix_classify_invoice_source_fallthrough` deployed via `mcp__supabase__apply_migration`.
+
+Two changes in one migration:
+
+#### Change 1: `fn_classify_invoice_source`
+- Added explicit `'phone'` bucket: matches `%by phone%`, `%direct%phone%`, `%phone%`.
+- Separated the `%direct%` branch: now returns `'walk_in'` only when it does NOT match `%walk%` or `%phone%` first (ordering of IF blocks handles this — walk checked before phone, phone before plain direct).
+- Changed fallthrough `ELSE` from `'walk_in'` to `'other'`. Root cause of BUG-001.
+- Behaviour preserved for all known OTA sources (mmt/goibibo/makemytrip, yatra/desiya, agoda), walk-in patterns, and blank/null (still `'walk_in'`).
+
+#### Change 2: `rpc_submit_manual_payment_entry` commission eligibility block
+- Before: `v_source_bucket IN ('walk_in') OR lower(v_invoice.source) ILIKE '%by phone%' OR ...` — mixed fn + raw ILIKE, phone patterns duplicated.
+- After: `v_source_bucket IN ('walk_in', 'phone')` — single call to `fn_classify_invoice_source`, phone patterns now live only in the classifier. Unrecognised sources (`'other'`) are eligible.
+
+### Test results (all PASS)
+| Input | Result | Expected |
+|---|---|---|
+| `'AsiaTech'` | `other` | NOT walk_in |
+| `'Direct - Walk-In'` | `walk_in` | walk_in |
+| `'Direct - By Phone'` | `phone` | phone |
+| `'Cleartrip'` | `other` | other |
+| `'Expedia'` | `other` | other |
+| `'MakeMyTrip'` | `mmt` | mmt |
+| `'Yatra Online'` | `yatra` | yatra |
+| `'Agoda'` | `agoda` | agoda |
+| `''` (empty) | `walk_in` | walk_in |
+| `NULL` | `walk_in` | walk_in |
+| `'Direct'` (alone) | `walk_in` | walk_in |
+| `'Corporate Travel'` | `other` | other |
+
+### Files changed (DB only — no source files)
+- Supabase migration: `fix_classify_invoice_source_fallthrough`
+- Functions updated: `fn_classify_invoice_source`, `rpc_submit_manual_payment_entry`
+
+### Sentinel errors unchanged
+- `WRITEOFF_SOURCE_NOT_ELIGIBLE` still raised for `walk_in` and `phone` buckets only.
+
+## [2026-06-20] DUP-2 — Atomic File Pickup + Duplicate Invoice Guard — COMPLETED
+
+### What was built
+Two separate race-condition fixes for the 8-worker parallel pipeline.
+
+#### 2a. `rpc_claim_next_files(p_limit int)` — Supabase migration `dup2_claim_next_files_rpc`
+- `RETURNS SETOF files` (all columns) so `FileRecord.from_dict` works unchanged.
+- `SECURITY DEFINER`, `search_path = public, pg_temp`, `GRANT EXECUTE TO service_role`.
+- Body: CTE selects `status='pending'` rows ordered by `created_at LIMIT p_limit FOR UPDATE SKIP LOCKED`, then UPDATEs those rows to `status='processing', updated_at=NOW()`, RETURNING `f.*`.
+- Workers that lose the lock race skip those rows immediately (SKIP LOCKED) rather than blocking.
+
+#### 2b. `get_pending_files` updated — `src/database/client.py`
+- **Before:** plain `SELECT * FROM files WHERE status='pending'` — all 8 workers fetched the same list simultaneously.
+- **After:** calls `self.client.rpc('rpc_claim_next_files', {'p_limit': batch_limit})`. Each worker invocation returns only rows it has atomically claimed.
+- Failed-files path unchanged (plain SELECT on terminal rows — no race risk).
+- `batch_limit=100` default; matches expected daily volume.
+- `process_file`'s `update_file_status(PROCESSING)` at the top is now a no-op for claimed rows (idempotent).
+
+#### 2c. `DuplicateInvoiceError` + catch in `insert_document_extraction` — `src/database/client.py`
+- New exception class `DuplicateInvoiceError(invoice_number, file_id)` defined at module level.
+- In `insert_document_extraction`: when `main_table_name == 'hotel_invoice'` and the exception message contains `'hotel_invoice_invoice_number_unique'` or `'23505'` (PG UNIQUE violation code), emits structured `logger.warning("DUPLICATE_INVOICE_INSERT_SKIPPED", extra={file_id, invoice_number, constraint, table})` then raises `DuplicateInvoiceError`.
+- Re-export added to `src/database/__init__.py`.
+
+#### 2d. `DuplicateInvoiceError` handler in `process_file` — `src/main.py`
+- New `except DuplicateInvoiceError as dup_err:` block BEFORE the generic `except Exception`.
+- Logs `logger.warning("DUPLICATE_INVOICE_SKIPPED", extra={file_id, file_name, invoice_number, constraint})`.
+- Writes `processing_logs` row with `duplicate_invoice_number` detail.
+- Calls `update_file_status(FAILED, error_message="Duplicate invoice_number: X", increment_retry=False)`.
+- Does NOT re-raise — worker continues to next file.
+- Import: `from database.client import DatabaseClient, DuplicateInvoiceError`.
+
+### Smoke tests
+- RPC `SECURITY DEFINER=true`, `search_path=[public,pg_temp]` — PASS (verified via `pg_proc`).
+- `SELECT count(*) FROM rpc_claim_next_files(0)` — returns 0, no error — PASS.
+- Constraint name `hotel_invoice_invoice_number_unique` confirmed on `hotel_invoice` table — PASS.
+
+### Files changed
+- `src/database/client.py` — `get_pending_files` rewrite, `DuplicateInvoiceError` class, `insert_document_extraction` duplicate catch
+- `src/database/__init__.py` — re-export `DuplicateInvoiceError`
+- `src/main.py` — import `DuplicateInvoiceError`, new handler in `process_file`
+- Supabase migration: `dup2_claim_next_files_rpc`
+
+### Known limitations / notes
+- The `failed`-files path still uses a plain SELECT. A race between two runs retrying the same `failed` row is low-risk (last-writer-wins on the `processing` status transition) and would ultimately be caught by the `DuplicateInvoiceError` guard anyway.
+- PostgREST wraps PG exceptions as plain Python exceptions. The duplicate detector checks both the constraint name string and the `23505` code string in the exception message. If PostgREST changes its error serialization format this detection logic would need updating.
+
+---
+
+## [2026-06-20] MPE-2 + CDW-2 — Manual Payment Entry RPCs — COMPLETED
+- Migration `mpe_cdw_rpcs` applied via Supabase MCP `apply_migration`.
+- 6 new SECURITY DEFINER RPCs (all owned by postgres, search_path=public,pg_temp, EXECUTE granted to authenticated):
+
+### RPCs built:
+1. **`rpc_submit_manual_payment_entry(p_invoice_id, p_payment_type, p_amount, p_transaction_date, [p_settlement_date, p_vpa, p_upi_transaction_id, p_party_name, p_note]) RETURNS jsonb`**
+   - Any operator or admin may call.
+   - Branches on payment_type: upi | another_machine | commission | tds.
+   - UPI: requires settlement_date + vpa + upi_transaction_id; cross-checks bank_statement (AYH059 UPI SETTLEMENT narration) and infers card_settlement_id from existing upi_transactions; populates admin_flags with NO_BANK_CREDIT and/or MPR_LINK_UNVERIFIED.
+   - another_machine: no UPI fields needed; inserts pending entry.
+   - commission/tds: requires party_name; commission blocks walk_in source via fn_classify_invoice_source; checks remaining gap from reconciliation_links.
+   - Returns {entry_id, status:'pending', admin_flags:[...]}.
+
+2. **`rpc_approve_manual_payment_entry(p_entry_id, [p_note]) RETURNS jsonb`**
+   - Admin only.
+   - UPI with valid card_settlement_id: inserts into upi_transactions, links to reconciliation_links (source_table='upi_transactions').
+   - UPI with NULL card_settlement_id (MPR_LINK_UNVERIFIED flag): links to reconciliation_links (source_table='manual_payment_entries') — cannot insert upi_transactions because card_settlement_id is NOT NULL on that table.
+   - another_machine: links to reconciliation_links (source_table='manual_payment_entries', payment_method='upi').
+   - commission/tds: re-checks gap; links to reconciliation_links (payment_method = entry.payment_type).
+   - All paths: calls fn_recompute_invoice_status, writes audit manual_payment.approve.
+   - Returns {entry_id, status:'approved'}.
+
+3. **`rpc_reject_manual_payment_entry(p_entry_id, p_reason) RETURNS jsonb`**
+   - Admin only. Requires non-empty reason. Raises ENTRY_NOT_PENDING if not pending.
+   - Returns {entry_id, status:'rejected'}.
+
+4. **`rpc_get_manual_payment_entries(p_invoice_id) RETURNS jsonb`**
+   - Any authenticated user. Enforces same visibility logic as RLS policy (submitted_by = auth.uid() OR is_admin()) explicitly inside SECURITY DEFINER body.
+   - Joins auth.users for submitter_email.
+   - Returns {entries:[...]} ordered by submitted_at DESC.
+
+5. **`rpc_get_pending_manual_payments([p_status='pending']) RETURNS jsonb`**
+   - Admin only. Accepts any status value for flexibility (e.g. 'rejected' for audit review).
+   - Joins hotel_invoice for invoice_number + guest_name, auth.users for submitter_email.
+   - Returns {entries:[...]} ordered by submitted_at DESC.
+
+6. **`rpc_get_deductions_report([p_date_from, p_date_to, p_type, p_party]) RETURNS jsonb`**
+   - Any authenticated operator or admin.
+   - Filters approved commission/tds entries; supports date range on reviewed_at, type filter, party ILIKE.
+   - Returns {rows:[{invoice_number, guest_name, source, payment_type, party_name, amount, approved_date}], totals:[{payment_type, party_name, total}]}.
+
+### Key schema discoveries:
+- `upi_transactions.card_settlement_id` is NOT NULL (FK to card_settlement). When card_settlement_id cannot be inferred (MPR_LINK_UNVERIFIED case), the approve path falls back to source_table='manual_payment_entries' instead of inserting a upi_transactions row.
+- `reconciliation_links` has 8 columns: id, invoice_id, source_table, source_id, payment_method, amount_applied, created_by (NOT NULL), created_at.
+- `fn_classify_invoice_source` returns 'walk_in' (with underscore) — consistent with RI-3 update.
+
+### Smoke tests (all PASS):
+- All 6 functions: SECURITY DEFINER=true, search_path=[public,pg_temp] — PASS.
+- Grants: EXECUTE on authenticated — PASS; auth guard rejects auth.uid()=NULL with 'Not authenticated' — PASS.
+- commission/tds/another_machine table inserts: 3 entries inserted + rolled back cleanly — PASS.
+- E2E approval flow (direct): commission entry inserted, reconciliation_link created (commission method, manual_payment_entries source), fn_recompute_invoice_status called, cleanup restored invoice to partial — PASS.
+- rpc_get_deductions_report query shape: returns {rows:[], totals:[]} for empty state — PASS.
+- rpc_get_pending_manual_payments query shape: returns {entries:[]} for empty state — PASS.
+- Zero leftover smoke data — PASS.
+
+### Sentinel errors:
+- `INVALID_PAYMENT_TYPE`
+- `AMOUNT_MUST_BE_POSITIVE`
+- `MANUAL_UPI_FIELDS_REQUIRED`
+- `MANUAL_UPI_EXCEEDS_BANK_CREDIT`
+- `PARTY_REQUIRED`
+- `WRITEOFF_SOURCE_NOT_ELIGIBLE`
+- `WRITEOFF_EXCEEDS_GAP`
+- `ENTRY_NOT_PENDING`
+- `REASON_REQUIRED`
+- `Not authenticated`
+- `Not authorized`
+
+## Status
+MPE-2 + CDW-2 DONE 2026-06-20. Frontend MPE-3 / CDW-3 unblocked.
+
+---
 
 ## Inbound Task — PF-2 (Payment Folio upload RPC + Resolve guard + 4-RPC auto-consume hook)
 - Issued by PM: 2026-05-23

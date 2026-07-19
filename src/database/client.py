@@ -82,6 +82,25 @@ class DatabaseClient:
             return FileRecord.from_dict(result.data[0])
         return None
     
+    def reset_orphaned_processing_files(self, stale_after_minutes: int = 60) -> int:
+        """Reset files stuck in 'processing' back to 'pending'.
+
+        A file is considered orphaned when it has been in 'processing' status
+        for longer than stale_after_minutes — this happens when a GitHub Actions
+        runner is killed mid-job (OOM, timeout, network drop) before the worker
+        can update the row to 'completed' or 'failed'.
+
+        Returns the number of rows reset.
+        """
+        result = self.client.rpc(
+            'rpc_reset_orphaned_files',
+            {'p_stale_minutes': stale_after_minutes}
+        ).execute()
+        count = result.data if isinstance(result.data, int) else 0
+        if count:
+            logger.warning(f"Reset {count} orphaned file(s) from 'processing' → 'pending'")
+        return count
+
     def get_pending_files(self, max_retries: int, batch_limit: int = 100) -> List[FileRecord]:
         """Atomically claim pending files and also fetch eligible failed files.
 

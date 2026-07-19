@@ -412,15 +412,26 @@ class InvoiceReconcileSystem:
                 logger.error(f"Failed to log error for file {file_name}: {str(log_error)}")
 
             try:
-                max_retries = self.config.system['max_ocr_retries']
-                increment_retry = file_record.ocr_retry_count < max_retries
-                db.update_file_status(
-                    file_id,
-                    FileStatus.FAILED,
-                    error_message=error_message,
-                    increment_retry=increment_retry
-                )
-                logger.info(f"File {file_name} marked as FAILED due to error: {error_message}")
+                if self._is_transient_error(error_message):
+                    # Infrastructure/quota failure — reset to pending so tonight's run retries it.
+                    # Do NOT increment ocr_retry_count; the file hasn't been genuinely attempted.
+                    db.update_file_status(
+                        file_id,
+                        FileStatus.PENDING,
+                        error_message=error_message,
+                        increment_retry=False
+                    )
+                    logger.warning(f"File {file_name} reset to PENDING after transient error: {error_message}")
+                else:
+                    max_retries = self.config.system['max_ocr_retries']
+                    increment_retry = file_record.ocr_retry_count < max_retries
+                    db.update_file_status(
+                        file_id,
+                        FileStatus.FAILED,
+                        error_message=error_message,
+                        increment_retry=increment_retry
+                    )
+                    logger.info(f"File {file_name} marked as FAILED due to error: {error_message}")
             except Exception as status_error:
                 logger.critical(
                     f"CRITICAL: Failed to update file status to FAILED for {file_name}: {str(status_error)}. "
@@ -429,6 +440,26 @@ class InvoiceReconcileSystem:
 
             raise
     
+    def _is_transient_error(self, error_message: str) -> bool:
+        """Return True for errors that are infrastructure/quota failures, not extraction failures.
+
+        Transient errors should NOT consume a retry slot — the file goes back to
+        'pending' so the next nightly run picks it up fresh.
+        """
+        transient_markers = [
+            'insufficient_quota',
+            'rate_limit_exceeded',
+            'Error code: 429',
+            'Error code: 500',
+            'Error code: 502',
+            'Error code: 503',
+            'Error code: 504',
+            'Connection error',
+            'timeout',
+        ]
+        msg_lower = error_message.lower()
+        return any(m.lower() in msg_lower for m in transient_markers)
+
     def run_processing(self) -> None:
         """Run processing phase for pending files in parallel."""
         logger.info("Starting processing phase")
@@ -472,9 +503,12 @@ class InvoiceReconcileSystem:
         logger.info("=" * 60)
         
         try:
+            # Phase 0: Reset any files orphaned by a previous crashed run
+            self.db_client.reset_orphaned_processing_files(stale_after_minutes=60)
+
             # Phase 1: Discovery
             self.run_discovery()
-            
+
             # Phase 2: Processing
             self.run_processing()
             

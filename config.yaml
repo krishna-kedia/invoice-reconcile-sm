@@ -221,7 +221,7 @@ document_types:
             required: true
           - name: mdr_percent
             type: number
-            required: true
+            required: false
       # Array field for UPI transactions
       - name: upi
         type: array

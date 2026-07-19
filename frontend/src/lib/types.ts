@@ -526,6 +526,82 @@ export interface ManualPaymentEntry {
 
 // ---------- Payment Folio ----------
 
+// ---------- Monthly Reconciliation Report (MRR-2) ----------
+
+export interface ReconciliationReceivedChannels {
+  mmt: number;
+  goibibo: number;
+  card: number;
+  upi: number;
+  cash: number;
+  bank_transfer: number;
+  another_machine: number;
+  other: number;
+  total: number;
+}
+
+export interface ReconciliationDeductions {
+  commission: number;
+  gst_on_commission: number;
+  tds: number;
+  tcs: number;
+  mdr: number;
+  total: number;
+}
+
+export interface ReconciliationMonthSummary {
+  invoice_month: string; // ISO date string "2026-06-01"
+  invoice_count: number;
+  gross_billed: number;
+  taxable_amount: number;
+  gst: number;
+  received: ReconciliationReceivedChannels;
+  deductions: ReconciliationDeductions;
+  outstanding: number;
+}
+
+export interface BookingTypeBreakdownRow {
+  source: string;
+  invoice_count: number;
+  gross_billed: number;
+  gst: number;
+  net_receivable: number;
+  total_deductions: number;
+  received: number;
+  outstanding: number;
+}
+
+export interface PaymentTimingRow {
+  period: string;
+  label: string;
+  amount: number;
+  pct: number;
+}
+
+export interface PendingReconciliationInvoice {
+  id: string;
+  invoice_number: string;
+  guest_name: string;
+  checkout_date: string;
+  source: string;
+  grand_total: number;
+  received: number;
+  outstanding: number;
+  status: "unreconciled" | "partial";
+}
+
+export interface ReconciliationMonthDetail {
+  summary: {
+    total_billed: number;
+    net_receivable: number;
+    total_received: number;
+    outstanding: number;
+  };
+  booking_type_breakdown: BookingTypeBreakdownRow[];
+  payment_timing: PaymentTimingRow[];
+  pending_invoices: PendingReconciliationInvoice[];
+}
+
 export interface PaymentSuggestion {
   id: string;
   payment_method: string;

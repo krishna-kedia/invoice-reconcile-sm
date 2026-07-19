@@ -28,6 +28,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     { href: "/admin/mis", label: "MIS Report" },
     { href: "/admin/manual-payments", label: "Manual Payments" },
     { href: "/reports/deductions", label: "Deductions" },
+    { href: "/reports/reconciliation", label: "Reconciliation Report" },
     { href: "/audit", label: "Audit Log" },
     { href: "/admin/issues", label: "Issues" },
     { href: "/admin/settings/payment-sources", label: "Settings" },

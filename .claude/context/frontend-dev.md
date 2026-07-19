@@ -137,6 +137,16 @@
 
 ## What I've Built
 
+### [2026-07-18] MRR-2 — Monthly Reconciliation Report
+- Created `src/app/(app)/reports/reconciliation/page.tsx` — server component, passes searchParams to client
+- Created `src/app/(app)/reports/reconciliation/reconciliation-summary-client.tsx` — wide 21-column table with two-row header (group + individual), date range filter (month inputs), Apply button, totals row, month rows link to detail page. All 4 UI states handled.
+- Created `src/app/(app)/reports/reconciliation/[month]/page.tsx` — server component, converts "yyyy-MM" to "yyyy-MM-01" for RPC
+- Created `src/app/(app)/reports/reconciliation/[month]/reconciliation-detail-client.tsx` — summary cards (4-up), Booking Type Breakdown table, Payment Timing table with amber tinting for pending row. All 4 UI states handled.
+- Modified `src/lib/types.ts` — added ReconciliationReceivedChannels, ReconciliationDeductions, ReconciliationMonthSummary, BookingTypeBreakdownRow, PaymentTimingRow, ReconciliationMonthDetail
+- Modified `src/lib/supabase/middleware.ts` — added `|| path.startsWith("/reports")` to operator block so operators are redirected from all /reports/* routes
+- Modified `src/app/(app)/layout.tsx` — added "Reconciliation Report" → `/reports/reconciliation` to adminLinks; removed `/reports/deductions` from operatorLinks (operators can no longer access /reports/*)
+- Build: npm run build clean (20 routes), npx tsc --noEmit clean
+
 ### [2026-05-23 12:00] RI-4 + RI-5 — Report an Issue UI
 - Created `src/components/issue/issue-report-card.tsx` — displays the latest report on an invoice with status badge (red/green/slate left border), withdraw button (reporter + open only), resolve button (admin + open only), confirm dialogs for both actions.
 - Created `src/components/issue/report-issue-dialog.tsx` — trigger button (disabled if open report exists), dialog with source-filtered category dropdown, optional/required notes, inline error for ISSUE_ALREADY_OPEN and other sentinels.

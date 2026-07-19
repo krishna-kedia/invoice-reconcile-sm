@@ -84,7 +84,7 @@ class MmtPayoutInserter:
             'transaction_no': transaction_no,
             'file_id': file_id,
             'subject_ref': self._safe_str(parsed_json.get('subjectRef')),
-            'email_date': self._parse_iso_timestamp(parsed_json.get('emailDate')),
+            'email_date': self._parse_iso_timestamp(parsed_json.get('emailReceivedDate') or parsed_json.get('emailDate')),
             'exported_at': self._parse_iso_timestamp(parsed_json.get('exportedAt')),
             'processing_date': self._safe_str(transfer.get('processingDate')),
             'total_amount': total_amount,
