@@ -1,6 +1,204 @@
 # Database Manager Context
-<!-- Last updated: 2026-05-23 (PF-1 applied) -->
-<!-- Previous: 2026-05-23 14:15 -->
+<!-- Last updated: 2026-07-19 (MRR-2 mrr_rpc_include_unreconciled + MRR-4 mrr_rpc_pending_invoices + MRR-D data fixes) -->
+<!-- Previous: 2026-07-18 (MRR-1 + mrr_pending_formula_fix applied) -->
+<!-- Previous: 2026-06-20 16:45 (BUG-002 applied) -->
+<!-- Previous: 2026-06-20 16:30 (DUP-1 applied) -->
+<!-- Previous: 2026-06-20 16:15 (CDW-1 applied) -->
+<!-- Previous: 2026-06-20 (MPE-1 applied) -->
+<!-- Previous: 2026-05-23 (PF-1 applied) -->
+
+## [2026-07-19] MRR-2 — Remove `unreconciled` filter from both RPCs (`mrr_rpc_include_unreconciled`) — COMPLETED
+- Migration `mrr_rpc_include_unreconciled` applied via Supabase MCP. `CREATE OR REPLACE` on both RPCs; no schema/table changes.
+- **Change:** In both `rpc_get_reconciliation_monthly_summary` and `rpc_get_reconciliation_month_detail`, the `inv` CTE previously filtered `AND hi.reconciliation_status <> 'unreconciled'`. That line was removed so ALL invoices (fully_reconciled + partial + unreconciled) now appear in the report aggregates.
+- **Why:** GST file for June 2026 had 113 invoices; the app showed 100. The 13 missing were `unreconciled` invoices that existed in DB but were silently excluded. Removing the filter makes the report match the hotel's GST records (PRD FR-135 / BR-078 updated).
+- **Effect on June 2026:** 100 → 113 invoices; gross_billed increases accordingly. Outstanding correctly reflects what is genuinely unpaid, including unreconciled invoices.
+- Verification: `rpc_get_reconciliation_monthly_summary` June 2026 → 113 invoices (79 fully_reconciled + 21 partial + 13 unreconciled = ₹9,76,168 gross). PASS.
+
+## [2026-07-19] MRR-D — Data fix: MMT May 2026 duplicate commission (INV1988260167) — COMPLETED
+- **Root cause:** INV1988260167 (Thirumala Rao V, ₹4,590) had the MMT payout row deduct ₹1,004.30 via the `mmt_invoice` CTE (correct). Additionally, a manual commission `reconciliation_links` row was created on 2026-07-06 (id `ad4679e8-33c2-4923-af9c-e770c00317ec`) pointing at a `manual_payment_entries` row (id `4bc884e2-e30a-407c-a715-7d9bca2f1628`, amount ₹1,004). This double-counted the commission → `net_receivable` was ₹1,004 too low → outstanding = 17.78 + (−1,004.30) = **−₹986.52**.
+- **Fix (direct SQL, no migration):**
+  ```sql
+  DELETE FROM reconciliation_links WHERE id = 'ad4679e8-33c2-4923-af9c-e770c00317ec';
+  DELETE FROM manual_payment_entries WHERE id = '4bc884e2-e30a-407c-a715-7d9bca2f1628';
+  ```
+- **Post-fix:** MMT May 2026 outstanding corrected. INV1988260167 outstanding = +₹17.78 (single remaining OTA deduction via mmt_invoice).
+- Also resolved in bugs.md.
+
+## [2026-07-19] MRR-4 — Add `pending_invoices` to month detail RPC (`mrr_rpc_pending_invoices`) — COMPLETED
+- Migration `mrr_rpc_pending_invoices` applied via Supabase MCP. `CREATE OR REPLACE` on `rpc_get_reconciliation_month_detail` only.
+- **Changes to the RPC:**
+  1. `inv` CTE: added `invoice_number`, `guest_name`, `departure_time::date AS checkout_date`, `reconciliation_status` columns (previously only numeric aggregates were projected).
+  2. `inv_ext` CTE: propagated all four new columns.
+  3. New `pending_inv` CTE:
+     ```sql
+     pending_inv AS (
+       SELECT id, invoice_number, guest_name, checkout_date,
+              src_label AS source, grand_total, received,
+              round(grand_total - ota_ded - received, 2) AS outstanding,
+              reconciliation_status
+       FROM inv_ext
+       WHERE reconciliation_status IN ('unreconciled', 'partial')
+     )
+     ```
+  4. Final `jsonb_build_object`: added `'pending_invoices', COALESCE((SELECT jsonb_agg(row_to_json(p) ORDER BY p.checkout_date, p.invoice_number) FROM pending_inv p), '[]'::jsonb)`.
+- **Return shape addition:** `pending_invoices: PendingReconciliationInvoice[]` where each element has `{id, invoice_number, guest_name, checkout_date, source, grand_total, received, outstanding, reconciliation_status}`.
+- Ordered by `checkout_date, invoice_number` ascending.
+- Frontend type (`PendingReconciliationInvoice`) added to `frontend/src/lib/types.ts`; `ReconciliationMonthDetail` interface updated to include `pending_invoices`.
+- Section 4 added to `reconciliation-detail-client.tsx` (hidden when `pending_invoices.length === 0`). See frontend-dev.md for UI details.
+
+## Status
+MRR-2 + MRR-D + MRR-4 DONE 2026-07-19 (mrr_rpc_include_unreconciled + direct data fix + mrr_rpc_pending_invoices). Idle. (Prev: MRR-1 DONE 2026-07-18.)
+
+## [2026-07-18] MRR-1 — Monthly Reconciliation Report RPCs (`mrr_rpcs`) — COMPLETED
+- Migration `mrr_rpcs` applied via Supabase MCP. Two read-only functions, no schema/table changes.
+- Objects created (both `CREATE OR REPLACE`, so rollback = DROP):
+  - `public.rpc_get_reconciliation_monthly_summary(p_date_from date, p_date_to date) RETURNS jsonb` — SECURITY DEFINER, owner postgres, `SET search_path=''`, admin-gated via `public.is_admin()` (raises `Not authorized`, SQLSTATE 42501), no audit. EXECUTE revoked from PUBLIC/anon, granted to `authenticated`. Returns JSON array ordered `invoice_month DESC`, one element per calendar month of `hotel_invoice.departure_time`.
+  - `public.rpc_get_reconciliation_month_detail(p_month_start date) RETURNS jsonb` — same security profile. Returns `{summary, booking_type_breakdown[], payment_timing[]}` for one month.
+- **Key implementation facts (for whoever maintains these):**
+  - All table refs schema-qualified (`public.`) because `search_path=''`. `date_trunc`/`extract`/`round`/`to_char`/`jsonb_build_object` resolve from pg_catalog.
+  - `mmt_invoice` has 49 booking_ids with >1 row (multi-room). Pre-aggregated by `booking_id` (CTE `mi_agg`) BEFORE joining to `mmt_bookings_payout` to avoid deduction fan-out. Verified `reconciled_link_id` is unique (0 dupes) in mmt/yatra/agoda payout tables, so those back-pointer joins do not fan out.
+  - OTA deduction attribution chain: `payout.reconciled_link_id = reconciliation_links.id` → `reconciliation_links.invoice_id`. MMT/Goibibo deductions from `mmt_invoice` (go_mmt_commission, gst_on_commission, tds, tcs); Yatra `= yatra_commission_with_gst - gst` as commission, `gst` as gst_on_commission, tds, tcs; Agoda `commission`, `tds_withholding_tax` as tds. Manual write-offs = reconciliation_links `payment_method IN ('commission','tds')`. MDR = `card_transactions.gross_amount * mdr_percent / 100` (NULL-safe).
+  - Received channel classification is a single mutually-exclusive CASE. `mmt`/`goibibo` require `payment_method='mmt_payout'` AND `brand ILIKE`; MMT settlements that arrive as `bank_transfer` links land in the bank_transfer channel (their deductions still attach via the mbp back-pointer). In current data `received.mmt`/`goibibo` are mostly 0 for that reason — expected, not a bug.
+  - `source_id` is already `uuid` — joined directly (no `::uuid` cast needed despite spec text).
+  - Booking-type source labels (detail RPC): custom CASE on `hotel_invoice.source` → MakeMyTrip / Goibibo / Yatra(+Desiya) / Agoda / Walk-in / Phone / Other. Splits MMT vs Goibibo (which `fn_classify_invoice_source` collapses to `mmt`).
+  - Payment-timing bucket offset uses `(yr*12+mon)` month arithmetic. `pay_date IS NULL` or `mo<=0` → `same_month` (prepaid/undated folded into same-month bucket). 5 rows always emitted.
+- Smoke (as admin via `set_config('request.jwt.claim.sub', <admin uid>, false)`):
+  1. `rpc_get_reconciliation_monthly_summary('2026-01-01','2026-07-01')` → 4 months (Apr–Jul 2026), DESC. `outstanding = gross_billed − received.total − deductions.total` holds for every row. PASS.
+  2. `rpc_get_reconciliation_month_detail('2026-06-01')` → all 3 sections, TOTAL row present, summary matches RPC1 June. **After the `mrr_pending_formula_fix` migration (see below), payment_timing sums to net_receivable exactly (₹856,674.82) and pct totals 100.0 — acceptance #2 PASS.**
+  3. Advisors: MRR-1 adds NO new ERROR. My functions appear only as `authenticated_security_definer_function_executable` WARN (the shared project pattern) and are absent from the `anon_*` list (anon EXECUTE revoked). ERROR total is 28 = 15 rls_disabled_in_public + 11 policy_exists_rls_disabled + 1 sensitive_columns_exposed + 1 `security_definer_view` (`v_invoice_list_with_issue` — a pre-existing VIEW I did not create; not from MRR-1). PASS.
+  4. Operator / non-admin session → `Not authorized`. PASS.
+- **Decisions (all resolved by team-lead 2026-07-18):**
+  - **Role gate = `is_admin()`** (admin-only) — CONFIRMED (user confirmed admin-only explicitly). PRD §14D.6 prose says `is_operator_or_admin()` but that's an internal PRD contradiction that was overruled; §14D.3 / brief / execution.md win. No change.
+  - **Payment-timing "pending" — RESOLVED via follow-up migration `mrr_pending_formula_fix`.** Original spec pinned pending to `gross − Σ all amount_applied`, but OTA commission/TDS/TCS and MDR are *computed* deductions (not reconciliation_links), so that formula overshot net_receivable by the OTA+MDR total (₹13,106.20 for Jun 2026). Team-lead chose option (a): **`pending = net_receivable − Σ period_bucket_amounts`.** Now the payment_timing table sums exactly to net_receivable and pct sums to 100. This changed only `rpc_get_reconciliation_month_detail` (the monthly summary RPC was untouched — it never had this issue).
+  - **Negative values: NOT clamped** — CONFIRMED. Show actual values (negative TDS, Agoda negative total_deductions, Walk-in negative outstanding from MDR-on-fully-received) as data signals for the admin.
+
+### [2026-07-18] MRR-1 follow-up — `mrr_pending_formula_fix` migration
+- `CREATE OR REPLACE` of `public.rpc_get_reconciliation_month_detail(date)` only. Changed the `timing_rows` pending row from `total_billed − Σ all_applied` to `(total_billed − total_deductions) − Σ timing_agg.amount`. Removed the now-unused `all_applied` CTE. Security profile, signature, grants unchanged.
+- Re-verified: `rpc_get_reconciliation_month_detail('2026-06-01')` → payment_timing sums to net_receivable ₹856,674.82 exactly; pct sum = 100.0; pending = ₹36,794.58.
+
+- Rollback (drops both functions; the pending-formula fix has no separate rollback since it's a REPLACE — dropping the function removes it entirely):
+  ```sql
+  DROP FUNCTION IF EXISTS public.rpc_get_reconciliation_month_detail(date);
+  DROP FUNCTION IF EXISTS public.rpc_get_reconciliation_monthly_summary(date, date);
+  ```
+
+## [2026-06-20 16:45] BUG-002 — manual_payment_entries.admin_flags NOT NULL DEFAULT '[]'::jsonb — COMPLETED
+- Migration `fix_mpe_admin_flags_default` applied via Supabase MCP (PRD § 14A.5). Fixes MPE-1 deviation where `admin_flags` was created nullable with no default.
+- Pre-state (information_schema): `admin_flags` jsonb, is_nullable=YES, column_default=NULL. **0 rows had NULL admin_flags** — backfill UPDATE was a safe no-op but kept in the migration for correctness/idempotency.
+- Migration body (single tx): (1) `UPDATE ... SET admin_flags='[]'::jsonb WHERE admin_flags IS NULL;` (2) `ALTER COLUMN admin_flags SET DEFAULT '[]'::jsonb, SET NOT NULL;`
+- Post-state verified (information_schema): is_nullable=**NO**, column_default=**`'[]'::jsonb`**. PASS.
+- Rollback:
+  ```sql
+  ALTER TABLE public.manual_payment_entries
+    ALTER COLUMN admin_flags DROP NOT NULL,
+    ALTER COLUMN admin_flags DROP DEFAULT;
+  -- (backfilled rows are indistinguishable from genuine '[]'::jsonb; no data restore needed)
+  ```
+
+## [2026-06-20 16:30] DUP-1 — Dedup hotel_invoice + UNIQUE(invoice_number) — COMPLETED
+- Migration `dup_hotel_invoice_unique_constraint` applied atomically via Supabase MCP (single migration = one tx).
+- Background: an earlier run found **8** duplicate `invoice_number` pairs (not 4), blocked, rolled back. This run re-confirmed all ids fresh, then deduped.
+- **Pre-flight findings (key — deviated from task brief assumptions):**
+  - 8 dup pairs: INV1988260204/215/216/230/283/284/285/286. Each has one "keeper" (has reconciliation_links + consumed payment_entries) and one zero-link "orphan" — EXCEPT INV1988260283 where BOTH rows were zero-link.
+  - Keeper is NOT always the earlier `created_at` row. For 204 the earlier row is the keeper; for 215/216/230 the LATER row is the keeper. The orphan set was identified by **zero links**, not by timestamp.
+  - INV1988260283 (both zero-link): keeper = earlier `55203eed…` (user decision), orphan = `77e93590…`.
+  - **All 8 orphans each had exactly 1 OPEN issue report.** Plus the 283 keeper `55203eed` already had its OWN open report (`5dfc9159`, payment_not_received). The other 7 keepers had zero reports.
+- **Orphan → keeper re-parent map (issue report id in parens):**
+  - 38a7bdf1 (45f5886b) → a8e93c2d  [204]
+  - a74d6958 (66609580) → 78e862f7  [215]
+  - fb7e3faf (71ca1a92) → 39c7af07  [216]
+  - 66ce5006 (c564adf4) → 061fd1de  [230]
+  - 77e93590 (938bef37) → 55203eed  [283]
+  - ce6de73b (cc425a29) → 6db28ecc  [284]
+  - 86e5219a (7952fd55) → 110f00cd  [285]
+  - 1545774d (ebf35de9) → 7f43a878  [286]
+- **What happened to each issue report (audit trail preserved — recommended option):** all 8 orphan reports were UPDATEd to point at their keeper sibling and set `status='resolved_by_admin'`, `resolved_at=now()`. None deleted.
+  - **Deviation from task pseudo-SQL:** brief used `status='resolved'`, which is NOT a valid value. `invoice_issue_reports_status_chk` allows `{open, resolved_by_admin, resolved_by_reconciliation, withdrawn_by_operator}`. Used `resolved_by_admin` (this is an admin dedup, not a reconciliation auto-resolve). `resolved_by` left NULL — system migration has no specific admin actor uuid; column is nullable; fabricating an auth.users id would be wrong.
+  - **Why resolve (not leave open):** the keeper for 283 already had an open report. Re-parenting the orphan's report while leaving it `open` would give 283 two open reports → violates partial unique index `uq_invoice_issue_reports_one_open_per_invoice (invoice_id) WHERE status='open'`. Resolving the moved report avoids the collision. The 283 keeper retains its own single OPEN report.
+- In-tx guards before constraint add: (A) no keeper has >1 open report post-reparent; (B) no orphan retains ANY referencing row across all 6 FK tables (reconciliation_links, invoice_issue_reports, manual_payment_entries, payment_entries.consumed_for_invoice_id, approval_requests.target_invoice_id, discrepancies.invoice_id); (C) 0 orphans remain after delete; (D) 0 duplicate invoice_numbers remain. Then `ADD CONSTRAINT hotel_invoice_invoice_number_unique UNIQUE (invoice_number)`.
+- **Acceptance (all PASS):**
+  1. 8 orphan ids gone (count 0).
+  2. 0 duplicate invoice_numbers (341 rows total).
+  3. UNIQUE constraint `hotel_invoice_invoice_number_unique` present.
+  4. 8 re-parented reports survive with `status='resolved_by_admin'` + `resolved_at` set; 283 keeper still has its own 1 open report.
+  5. Duplicate clone-insert (rolled back in a DO block) raised `unique_violation`. (Note: minimal inserts hit other NOT NULL columns first — file_id/guest_name/etc; tested by cloning a full existing row with a fresh PK so invoice_number was the only collision.)
+  6. Advisors: 27 ERRORs — identical to CDW-1 baseline (rls_disabled_in_public ×15, policy_exists_rls_disabled ×11, sensitive_columns_exposed ×1). No new ERROR. The 2 hotel_invoice ERRORs are pre-existing RLS-disabled lints, untouched by DUP-1.
+- **Rollback** (note: deleted orphan rows + their pre-reparent linkage are NOT auto-restorable; drop constraint + un-resolve reports below; full row restore needs PITR/backup if ever required):
+  ```sql
+  ALTER TABLE public.hotel_invoice DROP CONSTRAINT hotel_invoice_invoice_number_unique;
+  -- Optionally revert the 8 re-parented reports to OPEN on their keeper (cannot restore deleted orphan parent rows):
+  UPDATE invoice_issue_reports SET status='open', resolved_at=NULL
+    WHERE id IN ('45f5886b-b794-4cd1-88ac-a5d19e9b4d3c','66609580-c1a1-49ff-84bf-fd87a610b00e',
+      '71ca1a92-8433-4ceb-b040-8d26c73a5863','c564adf4-fd1f-4b54-a2aa-d177c169ffa1',
+      '938bef37-0058-4aec-acab-2c9bbd8614f5','cc425a29-3dba-4ac4-a2f6-bdfcc6d190cf',
+      '7952fd55-b631-4d19-a980-46db282b70f5','ebf35de9-8714-4296-8c08-0975d4917791');
+  -- WARNING: do not run the UPDATE above as-is if a keeper already has an open report
+  -- (would violate uq_invoice_issue_reports_one_open_per_invoice) — e.g. 55203eed/938bef37.
+  ```
+
+## Notes for Product Manager (DUP-1)
+- `hotel_invoice.invoice_number` is now UNIQUE — the OCR/ingest pipeline can no longer insert a second row for the same invoice number. Any ingest path that blindly re-inserts must switch to UPSERT or pre-check. Flag to backend if the duplicate rows came from a re-run of extraction.
+- Duplicates were caused by re-ingestion creating a second row that picked up NO reconciliation links; the originally-linked row was kept. The 8 "duplicate_booking" issue reports operators had filed against the orphan copies are now marked `resolved_by_admin` and moved onto the surviving invoice — operators will see them as resolved history on the correct invoice.
+- INV1988260283 had two un-reconciled copies and two separate open reports; per your decision we kept the earlier copy and its own open report (`payment_not_received`) remains OPEN for follow-up. The duplicate_booking report from the deleted copy is now resolved on the keeper.
+- Deleted orphan rows are gone (no soft-delete); restoring them would require PITR. The keepers retain all reconciliation/payment linkage, so reconciliation state is intact.
+
+## [2026-06-20 16:15] CDW-1 — Commission & TDS Write-off schema — COMPLETED
+- Migration `cdw_schema` applied via Supabase MCP. Extends MPE-1 objects (single combined MPE/DUP/CDW release).
+- Changes:
+  1. Added `party_name TEXT NULL` + `note TEXT NULL` to `public.manual_payment_entries` (submitter free-text per PRD § 14C.5). Used `ADD COLUMN IF NOT EXISTS`.
+  2. Extended `manual_payment_entries_payment_type_check`: dropped + re-added. Final: `payment_type IN ('upi','another_machine','commission','tds')`. The separate `upi_fields_required` conditional CHECK is untouched (commission/tds rows leave UPI columns NULL, which the `payment_type <> 'upi'` branch already permits).
+  3. Extended `reconciliation_links_payment_method_check`: dropped + re-added with all existing values PLUS `'commission'`,`'tds'`. Final: `{upi, card, bank_transfer, cash, mmt_payout, corporate_credit, commission, tds}`.
+  4. `reconciliation_links_source_table_check` already included `'manual_payment_entries'` (added by MPE-1) — verified pre-flight, NO change made. Final unchanged: `{upi_transactions, card_transactions, bank_statement, cash_payments, manual_payment_entries}`.
+- Acceptance (all PASS, behavioral inserts inside a rolled-back DO block):
+  1. `party_name` + `note` columns present (both TEXT, nullable).
+  2. `payment_type` accepts `commission` + `tds`; rejects `garbage` (caught `check_violation`).
+  3. `reconciliation_links` rows with `payment_method='commission'` and `'tds'` + `source_table='manual_payment_entries'` insert without CHECK violation (created_by FK satisfied with a user_profiles id). 0 leftover rows confirmed afterward.
+  4. Advisors: no new ERRORs. 27 ERRORs total — identical pre-existing baseline (`rls_disabled_in_public` ×15, `policy_exists_rls_disabled` ×11, `sensitive_columns_exposed` ×1). None reference manual_payment_entries / reconciliation_links / the new columns. WARN count 76 (baseline).
+- Rollback:
+  ```sql
+  ALTER TABLE public.reconciliation_links DROP CONSTRAINT reconciliation_links_payment_method_check;
+  ALTER TABLE public.reconciliation_links ADD CONSTRAINT reconciliation_links_payment_method_check
+    CHECK (payment_method = ANY (ARRAY['upi','card','bank_transfer','cash','mmt_payout','corporate_credit']));
+  ALTER TABLE public.manual_payment_entries DROP CONSTRAINT manual_payment_entries_payment_type_check;
+  ALTER TABLE public.manual_payment_entries ADD CONSTRAINT manual_payment_entries_payment_type_check
+    CHECK (payment_type = ANY (ARRAY['upi','another_machine']));
+  ALTER TABLE public.manual_payment_entries DROP COLUMN IF EXISTS note;
+  ALTER TABLE public.manual_payment_entries DROP COLUMN IF EXISTS party_name;
+  -- source_table CHECK left as-is (owned by MPE-1 rollback).
+  ```
+
+## Notes for Product Manager (CDW-1)
+- Backend CDW-2 (`cdw_rpcs`) is unblocked: `payment_method='commission'|'tds'` links and `payment_type='commission'|'tds'` entries can now be written. The write-off link path mirrors MPE-2's another-machine path (`source_table='manual_payment_entries'`, `source_id=entry.id`, no source-remaining lock).
+- Deviation note: `reconciliation_links.created_by` is NOT NULL (references `user_profiles`). CDW-2's approve RPC must set it (the SECURITY DEFINER RPC supplies the actor) — same as every other reconcile RPC. Not a CDW concern but flagged since the bare acceptance insert needed it.
+- No `used` immutability trigger added (consistent with MPE-1; lifecycle is via `status`).
+
+## [2026-06-20] MPE-1 — Manual Payment Entries schema — COMPLETED
+- Migration `mpe_schema` applied successfully via Supabase MCP.
+- New objects:
+  - Table `public.manual_payment_entries` — PK uuid `id` (gen_random_uuid). 18 columns.
+    - FKs: `invoice_id` → hotel_invoice(id) NOT NULL; `submitted_by` → auth.users(id) NOT NULL; `reviewed_by` → auth.users(id); `card_settlement_id` → card_settlement(id); `upi_transaction_ref` → upi_transactions(id); `reconciliation_link_ref` → reconciliation_links(id) ON DELETE SET NULL.
+    - CHECKs: `payment_type IN ('upi','another_machine')`; `status IN ('pending','approved','rejected')` default 'pending'; `amount > 0`; `upi_fields_required` (payment_type='upi' requires settlement_date + vpa + upi_transaction_id all NOT NULL).
+    - Timestamps: `submitted_at TIMESTAMPTZ NOT NULL DEFAULT now()`, `reviewed_at TIMESTAMPTZ`. `transaction_date DATE NOT NULL`, `settlement_date DATE`.
+  - 4 indexes: `idx_mpe_invoice_id`(invoice_id), `idx_mpe_status_pending`(status) WHERE status='pending', `idx_mpe_submitted_by`(submitted_by), `idx_mpe_settlement_date`(settlement_date) WHERE payment_type='upi'.
+  - RLS enabled. Policy `mpe_select` FOR SELECT USING `submitted_by = auth.uid() OR is_admin()`. INSERT/UPDATE/DELETE revoked from `authenticated`.
+  - Extended `reconciliation_links_source_table_check`: dropped + recreated to add `'manual_payment_entries'`. Final allowed list: `{upi_transactions, card_transactions, bank_statement, cash_payments, manual_payment_entries}`.
+- Acceptance (all PASS):
+  1. 18 columns present (id, invoice_id, payment_type, status, submitted_by, reviewed_by, submitted_at, reviewed_at, amount, transaction_date, settlement_date, vpa, upi_transaction_id, card_settlement_id, admin_flags, rejection_reason, upi_transaction_ref, reconciliation_link_ref).
+  2. RLS enabled (rowsecurity = true).
+  3. Insert of `source_table='manual_payment_entries'` into reconciliation_links succeeded inside a rolled-back DO block; 0 leftover rows; new CHECK def confirmed with all 5 values.
+  4. Advisors: no new ERRORs. The 27 ERROR security lints are all pre-existing baseline (OCR pipeline tables w/ RLS disabled). None reference manual_payment_entries. Performance: new MPE entries are only INFO (unused index x4, unindexed nullable secondary FKs x4) + 1 WARN `auth_rls_initplan` on `mpe_select` — same pattern as every other table; matches task spec which used bare `auth.uid()`.
+- Rollback:
+  ```sql
+  ALTER TABLE public.reconciliation_links DROP CONSTRAINT reconciliation_links_source_table_check;
+  ALTER TABLE public.reconciliation_links ADD CONSTRAINT reconciliation_links_source_table_check
+    CHECK (source_table = ANY (ARRAY['upi_transactions','card_transactions','bank_statement','cash_payments']));
+  DROP TABLE IF EXISTS public.manual_payment_entries;  -- drops table, indexes, policy together
+  ```
+
+## Notes for Product Manager (MPE-1)
+- `manual_payment_entries` allows operators to submit manual UPI / another-machine card payments for admin review (pending → approved/rejected). RLS lets an operator see only their own submissions; admins see all.
+- Mutations are revoked from `authenticated` — inserts/approvals/rejections must go through SECURITY DEFINER RPCs (not yet built; presumably MPE-2 backend work). The `business rule "used = true must not be modifiable"` is not yet enforced at DB level for this table; there is no `used` flag here — the lifecycle is via `status` + `reconciliation_link_ref`. Flag if an immutability trigger is required.
+- 4 nullable secondary FKs (reviewed_by, card_settlement_id, upi_transaction_ref, reconciliation_link_ref) are unindexed by design (not in task's index list). Add covering indexes later if these become hot join/filter columns.
 
 ## [2026-05-23] PF-1 — COMPLETED
 - Migration `pf_payment_folio_schema` applied. Advisors: no new errors related to PF-1 objects (baseline pre-existing `policy_exists_rls_disabled` items unchanged).
@@ -231,4 +429,4 @@
 - There is no `v_mmt_monthly_deductions` consumption in the frontend yet — the existing MMT view (created earlier) is currently unused. Future MIS tabs can adopt the same pattern as the new Yatra tab.
 
 ## Status
-Y7 DONE 2026-05-23. Idle.
+MRR-1 DONE 2026-07-18 (mrr_rpcs + mrr_pending_formula_fix — 2 read-only report RPCs; all 4 smoke checks PASS after team-lead confirmed pending = net_receivable − Σ periods). Idle. (Prev: BUG-002 DONE 2026-06-20 16:45; DUP-1 DONE 2026-06-20 16:30; CDW-1 DONE 2026-06-20 16:15; MPE-1 DONE 2026-06-20; Y7 DONE 2026-05-23.)
