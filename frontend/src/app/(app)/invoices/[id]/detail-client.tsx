@@ -1094,11 +1094,10 @@ function AddPaymentManuallyButton({ invoiceId }: { invoiceId: string }) {
       toast.show("success", "Manual payment entry submitted. It will be reviewed by an admin.");
       qc.invalidateQueries({ queryKey: ["manual_entries", invoiceId] });
 
+      setSubmitting(false);
       // Keep modal open to show banners if any, otherwise close
       if (banners.length === 0) {
         handleClose();
-      } else {
-        setSubmitting(false);
       }
     } catch {
       setFieldError("A network error occurred. Please check your connection and try again.");
@@ -1491,6 +1490,7 @@ function MarkAsCommissionTdsButton({
         `${type === "commission" ? "Commission" : "TDS"} entry submitted. It will be reviewed by an admin.`
       );
       onSuccess();
+      setSubmitting(false);
       handleClose();
     } catch {
       setFieldError("A network error occurred. Please check your connection and try again.");
